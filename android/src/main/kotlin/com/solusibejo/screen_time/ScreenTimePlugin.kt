@@ -10,6 +10,7 @@ import com.solusibejo.screen_time.const.MethodName
 import com.solusibejo.screen_time.const.ScreenTimePermissionType
 import com.solusibejo.screen_time.const.UsageInterval
 import com.solusibejo.screen_time.service.AppMonitoringService
+import com.solusibejo.screen_time.service.BlockAppService
 import com.solusibejo.screen_time.util.EnumExtension.toCamelCase
 import com.solusibejo.screen_time.util.EnumExtension.toEnumFormat
 import io.flutter.Log
@@ -46,7 +47,11 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
   private var activity: Activity? = null
   private var pendingResult: Result? = null
   private var pendingMethod: String? = null
+  private val REQUEST_PICK_APPS = 10080
   private val REQUEST_SELECT_AND_SAVE = 10081
+  private var pendingSelectionStorageKey: String = "screenTimeSelection"
+  private var pendingPickEndTimeMs: Long? = null
+  private var pendingShieldConfig: Map<String, String?>? = null
 
   companion object {
     const val PREF_NAME = "screen_time"
@@ -135,18 +140,32 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
 
         result.success(response.name.toCamelCase())
       }
+      MethodName.checkPermissions -> {
+        val permissions = ScreenTimeMethod.checkPermissions(context)
+        result.success(permissions)
+      }
       MethodName.appUsageData -> {
         val args = call.arguments as Map<String, Any?>
-        val startTimeInMillisecond = args[Argument.startTimeInMillisecond] as Int?
-        val endTimeInMillisecond = args[Argument.endTimeInMillisecond] as Int?
+        val startTimeInMillisecond = when (val value = args[Argument.startTimeInMillisecond]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> null
+        }
+        val endTimeInMillisecond = when (val value = args[Argument.endTimeInMillisecond]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> null
+        }
         val usageInterval = args[Argument.interval] as String?
             ?: UsageInterval.DAILY.name.lowercase()
         val packagesName = args[Argument.packagesName] as List<*>?
 
         val data = ScreenTimeMethod.appUsageData(
           context,
-          startTimeInMillisecond?.toLong(),
-          endTimeInMillisecond?.toLong(),
+          startTimeInMillisecond,
+          endTimeInMillisecond,
           UsageInterval.valueOf(usageInterval.uppercase(Locale.getDefault())),
           packagesName?.filterIsInstance<String>(),
         )
@@ -162,11 +181,37 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
       MethodName.blockApps -> {
         val args = call.arguments as Map<String, Any?>
         val packagesName = args[Argument.packagesName] as List<*>?
-        val durationInMillisecond = args[Argument.duration] as Int
-        val duration = Duration.ofMillis(durationInMillisecond.toLong())
+        val durationInMillisecond = when (val value = args[Argument.duration]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> 0L
+        }
+        val endTimeMillis = when (val value = args[Argument.endTime]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> null
+        }
+        val now = System.currentTimeMillis()
+        val targetEndTime = when {
+          endTimeMillis != null && endTimeMillis > now -> endTimeMillis
+          endTimeMillis != null -> now
+          else -> now + durationInMillisecond
+        }
+        val effectiveDurationMillis = (targetEndTime - now).coerceAtLeast(0L)
+        val duration = Duration.ofMillis(effectiveDurationMillis)
         val layoutName = args[Argument.layoutName] as String?
         val notificationTitle = args[Argument.notificationTitle] as String?
         val notificationText = args[Argument.notificationText] as String?
+        val shieldTitle = args[Argument.shieldTitle] as String?
+        val shieldSubtitle = args[Argument.shieldSubtitle] as String?
+        val shieldTitleColor = args[Argument.shieldSubtitleColor] as String?
+        val shieldSubtitleColor = args[Argument.shieldSubtitleColor] as String?
+        val shieldButtonLabel = args[Argument.shieldButtonLabel] as String?
+        val shieldButtonColor = args[Argument.shieldButtonColor] as String?
+        val shieldButtonTextColor = args[Argument.shieldButtonTextColor] as String?
+        val shieldIconName = args[Argument.shieldIconName] as String?
 
         val response = ScreenTimeMethod.blockApps(
           context,
@@ -175,7 +220,16 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
           sharedPreferences,
           layoutName,
           notificationTitle,
-          notificationText
+          notificationText,
+          targetEndTime,
+          uiTitle = shieldTitle,
+          uiSubtitle = shieldSubtitle,
+          uiTitleColor = shieldTitleColor,
+          uiSubtitleColor = shieldSubtitleColor,
+          uiButtonLabel = shieldButtonLabel,
+          uiButtonColor = shieldButtonColor,
+          uiButtonTextColor = shieldButtonTextColor,
+          uiIconName = shieldIconName
         )
 
         result.success(response)
@@ -184,12 +238,22 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
         val args = call.arguments as Map<String, Any?>
         val scheduleId = args[Argument.scheduleId] as String
         val packagesName = args[Argument.packagesName] as List<*>?
-        val startTime = args[Argument.startTime] as Int
-        val durationInMillisecond = args[Argument.duration] as Int
+        val startTime = when (val value = args[Argument.startTime]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> 0L
+        }
+        val durationInMillisecond = when (val value = args[Argument.duration]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> 0L
+        }
         val recurring = args[Argument.recurring]as Boolean
         val daysOfWeek = args[Argument.daysOfWeek] as List<*>?
 
-        val duration = Duration.ofMillis(durationInMillisecond.toLong())
+        val duration = Duration.ofMillis(durationInMillisecond)
 
         ScreenTimeMethod.scheduleBlock(
           context,
@@ -238,12 +302,33 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
       }
       MethodName.monitoringAppUsage -> {
         val args = call.arguments as Map<String, Any?>
-        val startHour = args[Argument.startHour] as Int
-        val startMinute = args[Argument.startMinute] as Int
-        val endHour = args[Argument.endHour] as Int
-        val endMinute = args[Argument.endMinute] as Int
+        val startHour = when (val value = args[Argument.startHour]) {
+          is Int -> value
+          is Number -> value.toInt()
+          else -> 0
+        }
+        val startMinute = when (val value = args[Argument.startMinute]) {
+          is Int -> value
+          is Number -> value.toInt()
+          else -> 0
+        }
+        val endHour = when (val value = args[Argument.endHour]) {
+          is Int -> value
+          is Number -> value.toInt()
+          else -> 23
+        }
+        val endMinute = when (val value = args[Argument.endMinute]) {
+          is Int -> value
+          is Number -> value.toInt()
+          else -> 59
+        }
         val usageInterval = args[Argument.interval] as String
-        val lookbackTimeMs = args[Argument.lookbackTimeMs] as Int
+        val lookbackTimeMs = when (val value = args[Argument.lookbackTimeMs]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> 10000L
+        }
         val packagesName = args[Argument.packagesName] as List<*>?
 
         val data = ScreenTimeMethod.monitoringAppUsage(
@@ -253,7 +338,7 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
           endHour,
           endMinute,
           UsageInterval.valueOf(usageInterval.uppercase(Locale.getDefault())),
-          lookbackTimeMs.toLong(),
+          lookbackTimeMs,
           packagesName?.filterIsInstance<String>(),
         )
 
@@ -269,18 +354,28 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
       MethodName.configureAppMonitoringService -> {
         val args = call.arguments as Map<String, Any?>
         val interval = args[Argument.interval] as String
-        val lookbackTimeMs = args[Argument.lookbackTimeMs] as Int
+        val lookbackTimeMs = when (val value = args[Argument.lookbackTimeMs]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> 10000L
+        }
         
         val data = ScreenTimeMethod.configureAppMonitoringService(
           UsageInterval.valueOf(interval.uppercase(Locale.getDefault())),
-          lookbackTimeMs.toLong(),
+          lookbackTimeMs,
         )
         result.success(data)
       }
       MethodName.pauseBlockApps -> {
         val args = call.arguments as Map<String, Any?>
-        val pauseDurationInMillisecond = args[Argument.pauseDuration] as Int
-        val pauseDuration = Duration.ofMillis(pauseDurationInMillisecond.toLong())
+        val pauseDurationInMillisecond = when (val value = args[Argument.pauseDuration]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> 0L
+        }
+        val pauseDuration = Duration.ofMillis(pauseDurationInMillisecond)
         val notificationTitle = args[Argument.notificationTitle] as String?
         val notificationText = args[Argument.notificationText] as String?
         val showNotification = args[Argument.showNotification] as Boolean? ?: true
@@ -304,10 +399,61 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
         result.success(response)
       }
       // ===== iOS parity methods (Android implementations) =====
+      MethodName.pickApps -> {
+        val args = call.arguments as? Map<String, Any?> ?: emptyMap()
+        val act = activity
+        if (act == null) {
+          result.error("NO_ACTIVITY", "No foreground activity to present selector", null)
+          return
+        }
+        if (pendingResult != null) {
+          result.error("BUSY", "Another selection is in progress", null)
+          return
+        }
+        pendingResult = result
+        pendingMethod = MethodName.pickApps
+        pendingSelectionStorageKey =
+          (args[Argument.selectionStorageKey] as? String)?.takeIf { it.isNotBlank() }
+            ?: "screenTimeSelection"
+        pendingPickEndTimeMs = when (val value = args[Argument.endTime]) {
+          is Int -> value.toLong()
+          is Long -> value
+          is Number -> value.toLong()
+          else -> null
+        }
+        val config = mutableMapOf<String, String?>()
+        config[Argument.shieldTitle] = args[Argument.shieldTitle] as? String
+        config[Argument.shieldSubtitle] = args[Argument.shieldSubtitle] as? String
+        config[Argument.shieldSubtitleColor] = args[Argument.shieldSubtitleColor] as? String
+        config[Argument.shieldButtonLabel] = args[Argument.shieldButtonLabel] as? String
+        config[Argument.shieldButtonColor] = args[Argument.shieldButtonColor] as? String
+        config[Argument.shieldButtonTextColor] =
+          args[Argument.shieldButtonTextColor] as? String
+        config[Argument.shieldIconName] = args[Argument.shieldIconName] as? String
+        config[Argument.shieldIconAsset] = args[Argument.shieldIconAsset] as? String
+        pendingShieldConfig = config
+
+        val intent = Intent(act, AppSelectionActivity::class.java).apply {
+          putExtra("selectionStorageKey", pendingSelectionStorageKey)
+          putExtra("shieldTitle", config[Argument.shieldTitle])
+          putExtra("confirmButtonLabel", config[Argument.shieldButtonLabel])
+          putExtra("confirmButtonColor", config[Argument.shieldButtonColor])
+          putExtra("confirmButtonTextColor", config[Argument.shieldButtonTextColor])
+          putExtra("cancelButtonLabel", "取消")
+        }
+        act.startActivityForResult(intent, REQUEST_PICK_APPS)
+      }
       MethodName.getFamilyControlsAuthorizationStatus -> {
-        val st = ScreenTimeMethod.permissionStatus(context, com.solusibejo.screen_time.const.ScreenTimePermissionType.APP_USAGE)
+        val st = ScreenTimeMethod.permissionStatus(
+          context,
+          ScreenTimePermissionType.APP_USAGE
+        )
         val approved = (st == com.solusibejo.screen_time.const.ScreenTimePermissionStatus.APPROVED)
-        val status = if (approved) "approved" else "denied"
+        val status = when (st) {
+          com.solusibejo.screen_time.const.ScreenTimePermissionStatus.APPROVED -> "approved"
+          com.solusibejo.screen_time.const.ScreenTimePermissionStatus.DENIED -> "denied"
+          else -> "notDetermined"
+        }
         val map = mapOf(
           "success" to true,
           "status" to status,
@@ -316,12 +462,24 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
         result.success(JSONObject(map).toString())
       }
       MethodName.requestFamilyControlsAuthorization -> {
-        // 打开使用情况访问设置页
-        ScreenTimeMethod.requestPermission(context, com.solusibejo.screen_time.const.UsageInterval.DAILY, com.solusibejo.screen_time.const.ScreenTimePermissionType.APP_USAGE)
+        ScreenTimeMethod.requestPermission(
+          context,
+          UsageInterval.DAILY,
+          ScreenTimePermissionType.APP_USAGE
+        )
+        val newStatus = ScreenTimeMethod.permissionStatus(
+          context,
+          ScreenTimePermissionType.APP_USAGE
+        )
+        val statusText = when (newStatus) {
+          com.solusibejo.screen_time.const.ScreenTimePermissionStatus.APPROVED -> "approved"
+          com.solusibejo.screen_time.const.ScreenTimePermissionStatus.DENIED -> "denied"
+          else -> "notDetermined"
+        }
         val map = mapOf(
-          "success" to true,
-          "status" to "unknown",
-          "isApproved" to false
+          "success" to (newStatus == com.solusibejo.screen_time.const.ScreenTimePermissionStatus.APPROVED),
+          "status" to statusText,
+          "isApproved" to (newStatus == com.solusibejo.screen_time.const.ScreenTimePermissionStatus.APPROVED)
         )
         result.success(JSONObject(map).toString())
       }
@@ -339,6 +497,7 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
         }
         pendingResult = result
         pendingMethod = MethodName.selectAndSaveApps
+        pendingSelectionStorageKey = selectionStorageKey
         val intent = Intent(act, AppSelectionActivity::class.java)
         intent.putExtra("selectionStorageKey", selectionStorageKey)
         act.startActivityForResult(intent, REQUEST_SELECT_AND_SAVE)
@@ -364,12 +523,28 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
         val categoryCount = sharedPreferences.getInt("${selectionStorageKey}_category_count", 0)
         val packages = sharedPreferences.getStringSet("${selectionStorageKey}_packages", emptySet())?.toList() ?: emptyList()
 
+        val config = mutableMapOf<String, String?>()
+        config[Argument.shieldTitle] = args[Argument.shieldTitle] as? String
+        config[Argument.shieldSubtitle] = args[Argument.shieldSubtitle] as? String
+        config[Argument.shieldSubtitleColor] = args[Argument.shieldSubtitleColor] as? String
+        config[Argument.shieldButtonLabel] = args[Argument.shieldButtonLabel] as? String
+        config[Argument.shieldButtonColor] = args[Argument.shieldButtonColor] as? String
+        config[Argument.shieldButtonTextColor] = args[Argument.shieldButtonTextColor] as? String
+        config[Argument.shieldIconName] = args[Argument.shieldIconName] as? String
+        config[Argument.shieldIconAsset] = args[Argument.shieldIconAsset] as? String
+        persistShieldConfiguration(config)
+
         // 如果提供了 endTime，根据当前时间计算阻止时长并启动阻止
         val endTimeVal = args[Argument.endTime]
         val endTimeMs: Long? = when (endTimeVal) {
           is Int -> endTimeVal.toLong()
           is Long -> endTimeVal
           else -> null
+        }
+        if (endTimeMs != null) {
+          sharedPreferences.edit().putLong("shield_config_end_time", endTimeMs).apply()
+        } else {
+          sharedPreferences.edit().remove("shield_config_end_time").apply()
         }
         if (!packages.isNullOrEmpty() && endTimeMs != null && endTimeMs > System.currentTimeMillis()) {
           val durationMs = endTimeMs - System.currentTimeMillis()
@@ -381,7 +556,8 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
             sharedPreferences,
             null,
             null,
-            null
+            null,
+            endTimeMs
           )
         }
 
@@ -393,11 +569,19 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
         )
         result.success(JSONObject(map).toString())
       }
+      MethodName.getExtensionDebugInfo -> {
+        val debugInfo = ScreenTimeMethod.getExtensionDebugInfo(context, sharedPreferences)
+        result.success(JSONObject(debugInfo).toString())
+      }
       MethodName.clearAllShields -> {
-        val selectionStorageKey = "screenTimeSelection"
-        val packages = sharedPreferences.getStringSet("${selectionStorageKey}_packages", emptySet())?.toList() ?: emptyList()
+        // 从实际的屏蔽状态中读取被屏蔽的 app，而不是从 selection 中读取
+        val packages = sharedPreferences.getStringSet(BlockAppService.KEY_BLOCKED_PACKAGES, emptySet())?.toList() ?: emptyList()
         val ok = ScreenTimeMethod.unblockApps(context, packages, sharedPreferences)
         result.success(ok)
+      }
+      MethodName.getBlockingStatus -> {
+        val status = ScreenTimeMethod.getBlockingStatus(context, sharedPreferences)
+        result.success(JSONObject(status).toString())
       }
       else -> result.notImplemented()
     }
@@ -409,20 +593,75 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
   }
 
   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-    if (requestCode == REQUEST_SELECT_AND_SAVE) {
-      val res = pendingResult
-      pendingResult = null
-      pendingMethod = null
-      if (res != null) {
+    when (requestCode) {
+      REQUEST_PICK_APPS -> {
+        val res = pendingResult
+        pendingResult = null
+        pendingMethod = null
+
+        val success = data?.getBooleanExtra("success", false) ?: (resultCode == Activity.RESULT_OK)
         val appCount = data?.getIntExtra("appCount", 0) ?: 0
         val categoryCount = data?.getIntExtra("categoryCount", 0) ?: 0
-        val map = mapOf(
-          "success" to true,
+        val packages = data?.getStringArrayListExtra("packages") ?: arrayListOf<String>()
+
+        if (success) {
+          persistShieldConfiguration(pendingShieldConfig)
+          val endTimeMs = pendingPickEndTimeMs
+          if (endTimeMs != null) {
+            sharedPreferences.edit().putLong("shield_config_end_time", endTimeMs).apply()
+            if (packages.isNotEmpty() && endTimeMs > System.currentTimeMillis()) {
+              val remaining = endTimeMs - System.currentTimeMillis()
+              if (remaining > 0) {
+                ScreenTimeMethod.blockApps(
+                  context,
+                  packages,
+                  Duration.ofMillis(remaining),
+                  sharedPreferences,
+                  null,
+                  null,
+                  null,
+                  endTimeMs
+                )
+              }
+            }
+          } else {
+            sharedPreferences.edit().remove("shield_config_end_time").apply()
+          }
+        }
+
+        pendingShieldConfig = null
+        pendingPickEndTimeMs = null
+
+        val map = mutableMapOf<String, Any?>(
+          "success" to success,
           "appCount" to appCount,
           "categoryCount" to categoryCount,
           "totalSelected" to (appCount + categoryCount)
         )
-        res.success(JSONObject(map).toString())
+        if (!success) {
+          map["error"] = "cancelled"
+        }
+
+        res?.success(JSONObject(map).toString())
+        return true
+      }
+      REQUEST_SELECT_AND_SAVE -> {
+        val res = pendingResult
+        pendingResult = null
+        pendingMethod = null
+        val success = data?.getBooleanExtra("success", false) ?: (resultCode == Activity.RESULT_OK)
+        val appCount = data?.getIntExtra("appCount", 0) ?: 0
+        val categoryCount = data?.getIntExtra("categoryCount", 0) ?: 0
+        val map = mutableMapOf<String, Any?>(
+          "success" to success,
+          "appCount" to appCount,
+          "categoryCount" to categoryCount,
+          "totalSelected" to (appCount + categoryCount)
+        )
+        if (!success) {
+          map["error"] = "cancelled"
+        }
+        res?.success(JSONObject(map).toString())
         return true
       }
     }
@@ -478,5 +717,28 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
       // Log the error but don't throw as we're cleaning up
       android.util.Log.e("ScreenTimePlugin", "Error cleaning up stream: ${e.message}")
     }
+  }
+
+  private fun persistShieldConfiguration(config: Map<String, String?>?) {
+    val editor = sharedPreferences.edit()
+    val mapping = mapOf(
+      Argument.shieldTitle to "shield_config_title",
+      Argument.shieldSubtitle to "shield_config_subtitle",
+      Argument.shieldSubtitleColor to "shield_config_subtitle_color",
+      Argument.shieldButtonLabel to "shield_config_button_label",
+      Argument.shieldButtonColor to "shield_config_button_color",
+      Argument.shieldButtonTextColor to "shield_config_button_text_color",
+      Argument.shieldIconName to "shield_config_icon_name",
+      Argument.shieldIconAsset to "shield_config_icon_asset"
+    )
+    mapping.forEach { (argKey, prefKey) ->
+      val value = config?.get(argKey)
+      if (value.isNullOrBlank()) {
+        editor.remove(prefKey)
+      } else {
+        editor.putString(prefKey, value)
+      }
+    }
+    editor.apply()
   }
 }

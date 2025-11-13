@@ -28,6 +28,16 @@ xmlns:tools="http://schemas.android.com/tools"
         android:exported="false"
         android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar">
     </activity>
+    
+    <!-- Transparent Activity for pushing blocked apps to background -->
+    <activity
+        android:name=".TransparentActivity"
+        android:exported="false"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        android:excludeFromRecents="true"
+        android:taskAffinity=""
+        android:launchMode="singleTask">
+    </activity>
     <!-- WorkManager Provider -->
     <provider
         android:name="androidx.startup.InitializationProvider"
@@ -74,6 +84,13 @@ xmlns:tools="http://schemas.android.com/tools"
         <intent-filter>
             <action android:name="com.solusibejo.screen_time.STOP_BLOCKING" />
         </intent-filter>
+    </receiver>
+    
+    <!-- Service Restart Receiver -->
+    <receiver
+        android:name=".receiver.ServiceRestartReceiver"
+        android:exported="false"
+        android:enabled="true">
     </receiver>
 
     <!-- Accessibility Service for app blocking -->

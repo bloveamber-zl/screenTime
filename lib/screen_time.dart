@@ -4,6 +4,7 @@ import 'src/const/method_name.dart';
 import 'src/model/screen_time_permission_status.dart';
 import 'src/model/screen_time_permission_type.dart';
 import 'src/model/app_usage.dart';
+import 'src/model/installed_app.dart';
 import 'src/model/monitoring_app_usage.dart';
 import 'src/model/usage_interval.dart';
 export 'src/model/screen_time_permission_status.dart';
@@ -48,6 +49,23 @@ class ScreenTime {
         .permissionStatus(permissionType: permissionType);
   }
 
+  /// Check overlay and usage stats permissions
+  ///
+  /// Returns a map with the following keys:
+  /// - `hasOverlayPermission`: Whether overlay permission is granted
+  /// - `hasUsageStatsPermission`: Whether usage stats permission is granted
+  Future<Map<String, bool>> checkPermissions() async {
+    return await ScreenTimePlatform.instance.checkPermissions();
+  }
+
+  Future<List<InstalledApp>> installedApps({
+    bool ignoreSystemApps = true,
+  }) {
+    return ScreenTimePlatform.instance.installedApps(
+      ignoreSystemApps: ignoreSystemApps,
+    );
+  }
+
   /// Fetch app usage data from the device.
   ///
   /// Returns a map with the following keys:
@@ -72,25 +90,42 @@ class ScreenTime {
   ///
   /// Parameters:
   /// - `packagesName`: List of package names to block
-  /// - `duration`: How long to block the apps
   /// - `layoutName`: Optional custom layout name to use for the block overlay
   ///   This allows for customizing the UI of the block screen
   /// - `notificationTitle`: Title for the notification (default: "App Blocker Active")
   /// - `notificationText`: Text template for the notification (default: "Blocking {count} apps for {minutes} more minutes")
   ///   You can use placeholders: {count} for number of apps, {duration} or {minutes} for time remaining
+  /// - `endTime`: When to stop blocking (DateTime). Must be in the future.
   Future<bool> blockApps({
     List<String> packagesName = const <String>[],
-    required Duration duration,
     required String layoutName,
     String? notificationTitle,
     String? notificationText,
+    required DateTime endTime,
+    // Overlay UI customization (Android)
+    String? shieldTitle,
+    String? shieldSubtitle,
+    String? shieldTitleColor, // e.g. "#FFFFFF"
+    String? shieldSubtitleColor, // e.g. "#AAAAAA"
+    String? shieldButtonLabel,
+    String? shieldButtonColor, // e.g. "#FF0000"
+    String? shieldButtonTextColor, // e.g. "#FFFFFF"
+    String? shieldIconName, // optional: android drawable name
   }) async {
     return await ScreenTimePlatform.instance.blockApps(
       packagesName: packagesName,
-      duration: duration,
       layoutName: layoutName,
       notificationTitle: notificationTitle,
       notificationText: notificationText,
+      endTime: endTime,
+      shieldTitle: shieldTitle,
+      shieldSubtitle: shieldSubtitle,
+      shieldTitleColor: shieldTitleColor,
+      shieldSubtitleColor: shieldSubtitleColor,
+      shieldButtonLabel: shieldButtonLabel,
+      shieldButtonColor: shieldButtonColor,
+      shieldButtonTextColor: shieldButtonTextColor,
+      shieldIconName: shieldIconName,
     );
   }
 

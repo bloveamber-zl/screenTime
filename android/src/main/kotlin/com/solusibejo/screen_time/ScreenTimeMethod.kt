@@ -339,6 +339,39 @@ object ScreenTimeMethod {
     }
 
     /**
+     * Check overlay and usage stats permissions
+     * Returns a map with hasOverlayPermission and hasUsageStatsPermission
+     */
+    fun checkPermissions(context: Context): Map<String, Boolean> {
+        val hasOverlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(context)
+        } else {
+            true
+        }
+        
+        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val usageStatsMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                context.packageName
+            )
+        } else {
+            appOps.checkOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                context.packageName
+            )
+        }
+        val hasUsageStatsPermission = usageStatsMode == AppOpsManager.MODE_ALLOWED
+        
+        return mapOf(
+            "hasOverlayPermission" to hasOverlayPermission,
+            "hasUsageStatsPermission" to hasUsageStatsPermission
+        )
+    }
+
+    /**
      * Retrieves app usage data for the specified time period.
      * Provides detailed information about how long each app was used.
      *
@@ -442,15 +475,32 @@ object ScreenTimeMethod {
         layoutName: String? = null,
         notificationTitle: String? = null,
         notificationText: String? = null,
+        endTimeMillis: Long? = null,
+        uiTitle: String? = null,
+        uiSubtitle: String? = null,
+        uiTitleColor: String? = null,
+        uiSubtitleColor: String? = null,
+        uiButtonLabel: String? = null,
+        uiButtonColor: String? = null,
+        uiButtonTextColor: String? = null,
+        uiIconName: String? = null,
     ): Boolean {
         if (packagesName.isEmpty()) return false
 
         try {
-            // Check if AccessibilityService is enabled
-            if (permissionStatus(context, ScreenTimePermissionType.ACCESSIBILITY_SETTINGS) != ScreenTimePermissionStatus.APPROVED) {
-                Log.e("ScreenTimeMethod", "AccessibilityService not enabled")
-                return false
-            }
+            // Calm architecture: no longer require AccessibilityService for blocking
+            // (we rely on a foreground service + overlay). Keep overlay permission check below.
+            Log.d("ScreenTimeMethod", "blockApps() called with args: " +
+                    "packages=${packagesName.joinToString()}, " +
+                    "layoutName=$layoutName, " +
+                    "hasTitle=${!notificationTitle.isNullOrEmpty()}, " +
+                    "hasText=${!notificationText.isNullOrEmpty()}, " +
+                    "endTimeMillis=$endTimeMillis, " +
+                    "durationArg=${duration.toMillis()}ms")
+
+            // Quick permission diagnostics
+            val canOverlay = Settings.canDrawOverlays(context)
+            Log.d("ScreenTimeMethod", "Permission diagnostics: canDrawOverlays=$canOverlay")
 
             // Check draw overlay permission
             if (!Settings.canDrawOverlays(context)) {
@@ -458,25 +508,63 @@ object ScreenTimeMethod {
                 return false
             }
 
-            // Calculate end time
-            val endTime = System.currentTimeMillis() + duration.toMillis()
-            val durationMillis = duration.toMillis()
+            val now = System.currentTimeMillis()
+            val computedEndTime = endTimeMillis?.takeIf { it > now } ?: (now + duration.toMillis())
+            val durationMillis = (computedEndTime - now).coerceAtLeast(0L)
+            Log.d("ScreenTimeMethod", "Timing computed: now=$now, computedEndTime=$computedEndTime, remaining=$durationMillis ms")
+            if (durationMillis <= 0L) {
+                Log.e("ScreenTimeMethod", "Remaining duration is non-positive. Blocking will be skipped. " +
+                        "Check endTimeMillis and device time.")
+            }
 
             // Save block state to SharedPreferences
             with(sharedPreferences.edit()) {
-                putLong(BlockAppService.KEY_BLOCK_END_TIME, endTime)
+                putLong(BlockAppService.KEY_BLOCK_END_TIME, computedEndTime)
                 putStringSet(BlockAppService.KEY_BLOCKED_PACKAGES, packagesName.toSet())
                 putBoolean(BlockAppService.KEY_IS_BLOCKING, true)
                 apply()
             }
+            Log.d("ScreenTimeMethod", "State saved: isBlocking=${sharedPreferences.getBoolean(BlockAppService.KEY_IS_BLOCKING, false)}, " +
+                    "endTime=${sharedPreferences.getLong(BlockAppService.KEY_BLOCK_END_TIME, 0)}, " +
+                    "packages=${sharedPreferences.getStringSet(BlockAppService.KEY_BLOCKED_PACKAGES, setOf())?.joinToString()}")
 
             // Update AccessibilityService blocking state (real-time detection)
-            AppMonitoringService.updateBlockingState(context, packagesName.toSet(), endTime)
+            AppMonitoringService.updateBlockingState(context, packagesName.toSet(), computedEndTime)
+            Log.d("ScreenTimeMethod", "AppMonitoringService.updateBlockingState invoked")
 
             // Schedule WorkManager to unblock at end time (backup mechanism)
             scheduleWorkManagerUnblock(context, durationMillis)
+            Log.d("ScreenTimeMethod", "Unblock scheduled via WorkManager after ${durationMillis}ms")
 
-            Log.d("ScreenTimeMethod", "Blocking ${packagesName.size} apps until $endTime using AccessibilityService + WorkManager")
+            // Start the blocking service
+            val serviceIntent = Intent(context, BlockAppService::class.java).apply {
+                putStringArrayListExtra(Argument.packagesName, ArrayList(packagesName))
+                putExtra(Argument.duration, durationMillis)
+                putExtra(Argument.endTime, computedEndTime)
+                layoutName?.let { 
+                    putExtra(Argument.layoutName, it)
+                    putExtra(Argument.layoutPackage, context.packageName)
+                }
+                notificationTitle?.let { putExtra(Argument.notificationTitle, it) }
+                notificationText?.let { putExtra(Argument.notificationText, it) }
+                uiTitle?.let { putExtra(Argument.shieldTitle, it) }
+                uiSubtitle?.let { putExtra(Argument.shieldSubtitle, it) }
+                uiTitleColor?.let { putExtra(Argument.shieldSubtitleColor, it) }
+                uiSubtitleColor?.let { putExtra(Argument.shieldSubtitleColor, it) }
+                uiButtonLabel?.let { putExtra(Argument.shieldButtonLabel, it) }
+                uiButtonColor?.let { putExtra(Argument.shieldButtonColor, it) }
+                uiButtonTextColor?.let { putExtra(Argument.shieldButtonTextColor, it) }
+                uiIconName?.let { putExtra(Argument.shieldIconName, it) }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+            Log.d("ScreenTimeMethod", "BlockAppService start requested (SDK=${Build.VERSION.SDK_INT})")
+
+            Log.d("ScreenTimeMethod", "Blocking ${packagesName.size} apps until $computedEndTime using AccessibilityService + WorkManager")
             return true
         } catch (e: Exception) {
             Log.e("ScreenTimeMethod", "Error starting block", e)
@@ -698,6 +786,17 @@ object ScreenTimeMethod {
             // Cancel WorkManager unblock task (if any)
             cancelWorkManagerUnblock(context)
             
+            // Stop BlockAppService if it's running
+            if (BlockAppService.isServiceRunning(context)) {
+                Log.d("ScreenTimeMethod", "Stopping BlockAppService")
+                try {
+                    val serviceIntent = Intent(context, BlockAppService::class.java)
+                    context.stopService(serviceIntent)
+                } catch (e: Exception) {
+                    Log.e("ScreenTimeMethod", "Error stopping BlockAppService", e)
+                }
+            }
+            
             Log.d("ScreenTimeMethod", "Unblocked apps using AccessibilityService + WorkManager")
             return true
         } catch (e: Exception) {
@@ -883,6 +982,97 @@ object ScreenTimeMethod {
             Log.e("ScreenTimeMethod", "Error checking pause state", e)
             return false
         }
+    }
+
+    fun getBlockingStatus(
+        context: Context,
+        sharedPreferences: SharedPreferences
+    ): Map<String, Any?> {
+        val result = mutableMapOf<String, Any?>()
+
+        val isBlocking = sharedPreferences.getBoolean(BlockAppService.KEY_IS_BLOCKING, false)
+        val isPaused = sharedPreferences.getBoolean("is_paused", false)
+        val pausedRemainingTime = sharedPreferences.getLong("paused_remaining_time", 0L)
+        val blockedPackages =
+            sharedPreferences.getStringSet(BlockAppService.KEY_BLOCKED_PACKAGES, emptySet())?.filter { it.isNotBlank() }
+                ?: emptyList()
+        val blockEndTime = sharedPreferences.getLong(BlockAppService.KEY_BLOCK_END_TIME, 0L)
+        val now = System.currentTimeMillis()
+        val remainingTimeMs = if (blockEndTime > now) blockEndTime - now else 0L
+        val remainingDuration = Duration.ofMillis(remainingTimeMs.coerceAtLeast(0L))
+
+        result[Field.status] = true
+        result["success"] = true
+        result["isBlocked"] = isBlocking
+        result["isPaused"] = isPaused
+        result["blockedApps"] = blockedPackages
+        result["blockedAppsCount"] = blockedPackages.size
+        result["blockEndTime"] = blockEndTime
+        result["remainingTimeMs"] = remainingTimeMs
+        result["remainingTimeFormatted"] =
+            if (remainingTimeMs > 0) remainingDuration.inString() else "0 seconds"
+        result["blockReason"] = when {
+            isPaused -> "paused_block"
+            isBlocking -> "manual_block"
+            else -> "none"
+        }
+        result["canOverride"] = false
+
+        if (pausedRemainingTime > 0L) {
+            result["pausedRemainingTimeMs"] = pausedRemainingTime
+        }
+
+        try {
+            val manager = BlockScheduleManager(context)
+            val schedules = manager.getActiveSchedules()
+            if (schedules.isNotEmpty()) {
+                result["activeSchedules"] = schedules.map { schedule ->
+                    mapOf(
+                        "id" to schedule.id,
+                        "packages" to schedule.packages,
+                        "startTime" to schedule.startTime.toEpochMilli(),
+                        "duration" to schedule.duration.toMillis(),
+                        "isRecurring" to schedule.isRecurring,
+                        "daysOfWeek" to schedule.daysOfWeek
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            result["scheduleError"] = e.localizedMessage
+        }
+
+        return result
+    }
+
+    fun getExtensionDebugInfo(
+        context: Context,
+        sharedPreferences: SharedPreferences
+    ): Map<String, Any?> {
+        val result = getBlockingStatus(context, sharedPreferences).toMutableMap()
+
+        val pausedPackages =
+            sharedPreferences.getStringSet("paused_blocked_packages", emptySet())?.filter { it.isNotBlank() }
+                ?: emptyList()
+        if (pausedPackages.isNotEmpty()) {
+            result["pausedPackages"] = pausedPackages
+        }
+        val pauseEndTime = sharedPreferences.getLong("pause_end_time", 0L)
+        if (pauseEndTime > 0) {
+            result["pauseEndTime"] = pauseEndTime
+            val remainingPause = pauseEndTime - System.currentTimeMillis()
+            if (remainingPause > 0) {
+                result["remainingPauseTimeMs"] = remainingPause
+            }
+        }
+
+        result["monitoringServiceRunning"] = AppMonitoringService.isServiceRunning(context)
+        result["blockServiceRunning"] = ServiceUtil.isRunning(context, BlockAppService::class.java.name)
+        result["pauseNotificationRunning"] =
+            ServiceUtil.isRunning(context, PauseNotificationService::class.java.name)
+        result["timestamp"] = System.currentTimeMillis()
+        result["success"] = true
+
+        return result
     }
 
     /**

@@ -72,6 +72,24 @@ class MethodChannelScreenTime extends ScreenTimePlatform {
   }
 
   @override
+  Future<Map<String, bool>> checkPermissions() async {
+    final result = await methodChannel
+        .invokeMethod<Map<Object?, Object?>>(MethodName.checkPermissions);
+    if (result == null) {
+      return {
+        'hasOverlayPermission': false,
+        'hasUsageStatsPermission': false,
+      };
+    }
+    return {
+      'hasOverlayPermission':
+          (result['hasOverlayPermission'] as bool?) ?? false,
+      'hasUsageStatsPermission':
+          (result['hasUsageStatsPermission'] as bool?) ?? false,
+    };
+  }
+
+  @override
   Future<List<AppUsage>> appUsageData({
     DateTime? startTime,
     DateTime? endTime,
@@ -109,17 +127,44 @@ class MethodChannelScreenTime extends ScreenTimePlatform {
   @override
   Future<bool> blockApps({
     List<String> packagesName = const <String>[],
-    required Duration duration,
     required String layoutName,
     String? notificationTitle,
     String? notificationText,
+    required DateTime endTime,
+    String? shieldTitle,
+    String? shieldSubtitle,
+    String? shieldTitleColor,
+    String? shieldSubtitleColor,
+    String? shieldButtonLabel,
+    String? shieldButtonColor,
+    String? shieldButtonTextColor,
+    String? shieldIconName,
   }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final endTimeMillis = endTime.millisecondsSinceEpoch;
+    final diff = endTimeMillis - now;
+    final effectiveDuration = diff > 0 ? diff : 0;
+
     final arguments = <Object?, Object?>{
       Argument.packagesName: packagesName,
-      Argument.duration: duration.inMilliseconds,
+      Argument.duration: effectiveDuration,
       Argument.layoutName: layoutName,
       Argument.notificationTitle: notificationTitle,
       Argument.notificationText: notificationText,
+      Argument.endTime: endTimeMillis,
+      if (shieldTitle != null) Argument.shieldTitle: shieldTitle,
+      if (shieldSubtitle != null) Argument.shieldSubtitle: shieldSubtitle,
+      if (shieldTitleColor != null)
+        Argument.shieldSubtitleColor: shieldTitleColor,
+      if (shieldSubtitleColor != null)
+        Argument.shieldSubtitleColor: shieldSubtitleColor,
+      if (shieldButtonLabel != null)
+        Argument.shieldButtonLabel: shieldButtonLabel,
+      if (shieldButtonColor != null)
+        Argument.shieldButtonColor: shieldButtonColor,
+      if (shieldButtonTextColor != null)
+        Argument.shieldButtonTextColor: shieldButtonTextColor,
+      if (shieldIconName != null) Argument.shieldIconName: shieldIconName,
     };
 
     return await methodChannel.invokeMethod<bool>(

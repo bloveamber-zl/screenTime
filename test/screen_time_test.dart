@@ -67,12 +67,20 @@ class MockScreenTimePlatform
   }
 
   @override
+  Future<Map<String, bool>> checkPermissions() {
+    return Future.value({
+      'hasOverlayPermission': true,
+      'hasUsageStatsPermission': true,
+    });
+  }
+
+  @override
   Future<bool> blockApps({
     List<String> packagesName = const <String>[],
-    required Duration duration,
     required String layoutName,
     String? notificationTitle,
     String? notificationText,
+    required DateTime endTime,
   }) async {
     return true;
   }
@@ -124,6 +132,17 @@ class MockScreenTimePlatform
   @override
   Future<Map<String, dynamic>?> getBlockingStatus() {
     // TODO: implement getBlockingStatus
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<bool> clearAllShields() async {
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> invokeMethod<T>(String method,
+      [Map<String, dynamic>? args]) {
     throw UnimplementedError();
   }
 }

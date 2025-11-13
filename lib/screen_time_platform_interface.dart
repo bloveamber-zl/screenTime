@@ -55,6 +55,12 @@ abstract class ScreenTimePlatform extends PlatformInterface {
   }) =>
       throw UnimplementedError('permissionStatus() has not been implemented.');
 
+  /// Check overlay and usage stats permissions
+  /// Returns a map with hasOverlayPermission and hasUsageStatsPermission
+  Future<Map<String, bool>> checkPermissions() {
+    throw UnimplementedError('checkPermissions() has not been implemented.');
+  }
+
   /// Fetch app usage data from the device.
   ///
   /// Returns a map with the following keys:
@@ -72,10 +78,18 @@ abstract class ScreenTimePlatform extends PlatformInterface {
 
   Future<bool> blockApps({
     List<String> packagesName = const <String>[],
-    required Duration duration,
     required String layoutName,
     String? notificationTitle,
     String? notificationText,
+    required DateTime endTime,
+    String? shieldTitle,
+    String? shieldSubtitle,
+    String? shieldTitleColor,
+    String? shieldSubtitleColor,
+    String? shieldButtonLabel,
+    String? shieldButtonColor,
+    String? shieldButtonTextColor,
+    String? shieldIconName,
   }) =>
       throw UnimplementedError('blockApps() has not been implemented.');
 

@@ -1,18 +1,24 @@
 package com.solusibejo.screen_time.service
 
-import android.app.AppOpsManager
-import android.app.KeyguardManager
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
@@ -20,259 +26,322 @@ import androidx.core.app.NotificationCompat
 import com.solusibejo.screen_time.R
 import com.solusibejo.screen_time.ScreenTimePlugin
 import com.solusibejo.screen_time.const.Argument
-import com.solusibejo.screen_time.worker.ServiceMonitorWorker
-import com.solusibejo.screen_time.worker.ServiceRestartWorker
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.solusibejo.screen_time.receiver.ServiceRestartReceiver
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 class BlockAppService : Service() {
-    private var windowManager: WindowManager? = null
-    private var overlayView: View? = null
-    private var isOverlayDisplayed = false
-    private val blockedPackages = mutableSetOf<String>()
-    private var blockEndTime: Long = 0
-    private val serviceJob = SupervisorJob()
-    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
-    private var isResuming = false
-    
     companion object {
-        const val CHANNEL_ID = "BlockAppService_Channel_ID"
-        const val NOTIFICATION_ID = 1
-        private const val CHECK_INTERVAL = 1000L // 1 second
+        private const val TAG = "BlockAppService"
+        private const val NOTIFICATION_CHANNEL_ID = "BlockAppServiceChannel"
+        private const val NOTIFICATION_ID = 1001
+        private const val CHECK_INTERVAL_MS = 100L // 优化：100ms检查频率，提升响应速度
+        
+        // 防抖相关
+        private const val MIN_SHOW_INTERVAL_MS = 200L // 最小显示间隔，防止频繁闪烁
+        
+        // 服务守护
+        private const val SERVICE_GUARD_INTERVAL_MS = 10000L // 每10秒检查一次
+        
         const val KEY_BLOCK_END_TIME = "block_end_time"
         const val KEY_BLOCKED_PACKAGES = "blocked_packages"
         const val KEY_IS_BLOCKING = "isBlocking"
         const val DEFAULT_LAYOUT_NAME = "block_overlay"
-        private const val TAG = "BlockAppService"
-        
-        // WorkManager tags
-        private const val SERVICE_MONITOR_TAG = "block_app_service_monitor"
-        private const val SERVICE_RESTART_TAG = "block_app_service_restart"
         
         // Intent actions
         const val ACTION_START_BLOCKING = "${ScreenTimePlugin.PACKAGE_NAME}.START_BLOCKING"
 
-        // Check if service is running
         fun isServiceRunning(context: Context): Boolean {
             val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            return manager.getRunningServices(Integer.MAX_VALUE).any { 
+            return manager.getRunningServices(Int.MAX_VALUE).any {
                 it.service.className == BlockAppService::class.java.name 
             }
         }
     }
 
-    private val params = WindowManager.LayoutParams(
-        WindowManager.LayoutParams.MATCH_PARENT,
-        WindowManager.LayoutParams.MATCH_PARENT,
-        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-        PixelFormat.TRANSLUCENT
-    )
-
-
-    private fun isDeviceLocked(context: Context): Boolean {
-        val keyguardManager = context.getSystemService(KEYGUARD_SERVICE) as KeyguardManager
-
-        return keyguardManager.isKeyguardLocked
-    }
-
-
-    private fun startBlockingApps() {
-        // Log the packages we're blocking and until when
-        Log.d(TAG, "Starting blocking apps: ${blockedPackages.joinToString(", ")} until ${blockEndTime}")
-        Log.d(TAG, "Current time: ${System.currentTimeMillis()}, remaining: ${blockEndTime - System.currentTimeMillis()} ms")
-        
-        // Schedule a periodic work to ensure service keeps running
-        scheduleServiceMonitor()
-        
-        serviceScope.launch {
-            try {
-                // If we're resuming, the immediatelyRefetchForegroundApp method has already been called
-                // from onStartCommand, so we don't need another delay here.
-                // Just log that we're continuing with normal checks
-                if (isResuming) {
-                    Log.d(TAG, "Continuing with normal app checks after resume")
-                    // Don't reset isResuming flag here, it will be reset by immediatelyRefetchForegroundApp
-                }
-                
-                while (isActive && System.currentTimeMillis() < blockEndTime) {
-                    checkAndBlockApp()
-                    delay(CHECK_INTERVAL)
-                }
-                Log.d(TAG, "Block time ended, stopping service")
-                stopBlocking()
-            } catch (e: Exception) {
-                // Check if this is a cancellation exception, which is normal during service shutdown
-                if (e is kotlinx.coroutines.CancellationException) {
-                    Log.d(TAG, "Service job cancelled normally during shutdown")
-                    // No need to recover, this is an expected shutdown
-                    return@launch
-                }
-                
-                // For other exceptions, try to recover
-                Log.e(TAG, "Error in blocking loop", e)
-                Log.d(TAG, "Attempting to recover from error")
-                delay(1000) // Wait a bit before retrying
-                if (System.currentTimeMillis() < blockEndTime) {
-                    startBlockingApps() // Restart the blocking loop
-                } else {
-                    stopBlocking()
-                }
-            }
-        }
-    }
-
-    // Track the last confirmed foreground app to help with detection reliability
-    private var lastConfirmedForegroundApp: String? = null
-    private var lastForegroundAppTimestamp: Long = 0
+    private var executor: ScheduledExecutorService? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var windowManager: WindowManager? = null
+    private var overlayView: View? = null
+    private var indicatorView: View? = null // 左侧指示器
+    private var isOverlayDisplayed = false
+    private val blockedPackages = mutableSetOf<String>()
+    private var blockEndTime: Long = 0
+    private var currentForegroundApp = ""
+    private var lastForegroundApp: String? = null
+    private var selectedLayoutName: String = DEFAULT_LAYOUT_NAME
+    private var selectedLayoutPackage: String? = null
+    // UI config
+    private var uiTitle: String? = null
+    private var uiSubtitle: String? = null
+    private var uiTitleColor: String? = null
+    private var uiSubtitleColor: String? = null
+    private var uiButtonLabel: String? = null
+    private var uiButtonColor: String? = null
+    private var uiButtonTextColor: String? = null
+    private var uiIconName: String? = null
     
-    private suspend fun checkAndBlockApp() = withContext(Dispatchers.Default) {
-        if (!Settings.canDrawOverlays(this@BlockAppService) || 
-            !hasUsageStatsPermission(this@BlockAppService)) {
-            Log.e(TAG, "Missing required permissions, stopping service")
-            stopBlocking()
-            return@withContext
-        }
-
-        val foregroundApp = getForegroundApp()
-        val currentTime = System.currentTimeMillis()
-        Log.d(TAG, "Current foreground app: $foregroundApp")
+    // 防抖逻辑：记录最后一次显示锁屏的时间
+    private var lastShowOverlayTime = 0L
+    
+    // 透明Activity启动标记，避免重复启动
+    private var transparentActivityLaunched = false
+    
+    // 预加载相关
+    private val overlayParams = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.MATCH_PARENT,
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+        },
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+        gravity = Gravity.CENTER
+    }
+    
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "Service onCreate")
         
-        // Update our tracking of confirmed foreground apps
-        if (foregroundApp != null) {
-            // If this is from the primary detection method or a very recent app,
-            // consider it confirmed and update our tracking
-            lastConfirmedForegroundApp = foregroundApp
-            lastForegroundAppTimestamp = currentTime
-        }
+        loadBlockedApps()
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         
-        withContext(Dispatchers.Main) {
-            // If we have a foreground app and it's blocked, show the overlay
-            if (foregroundApp != null && 
-                blockedPackages.contains(foregroundApp) && 
-                !isDeviceLocked(this@BlockAppService)) {
-                
-                // Double-check if this is a recently confirmed app before showing overlay
-                val timeSinceConfirmation = currentTime - lastForegroundAppTimestamp
-                val isRecentlyConfirmed = timeSinceConfirmation < 30000 // 30 seconds
-                
-                if (isRecentlyConfirmed) {
-                    Log.d(TAG, "Showing overlay for blocked app: $foregroundApp")
-                    showOverlay()
-                } else {
-                    Log.d(TAG, "Not showing overlay for $foregroundApp - not recently confirmed")
-                    // We need to hide the overlay if it's currently shown
-                    hideOverlay()
-                }
-            } else {
-                // Only hide if we're not blocking the current app
-                if (foregroundApp != null && !blockedPackages.contains(foregroundApp)) {
-                    Log.d(TAG, "Hiding overlay, current app not blocked: $foregroundApp")
-                    hideOverlay()
-                } else if (isDeviceLocked(this@BlockAppService)) {
-                    Log.d(TAG, "Hiding overlay, device is locked")
-                    hideOverlay()
-                } else if (foregroundApp == null) {
-                    // If we can't detect the foreground app, check how long it's been since we had a confirmed app
-                    val timeSinceLastConfirmed = currentTime - lastForegroundAppTimestamp
-                    
-                    if (timeSinceLastConfirmed > 60000) { // 1 minute
-                        // If it's been a while since we had a confirmed foreground app, hide the overlay
-                        Log.d(TAG, "No foreground app detected for over a minute, hiding overlay")
-                        hideOverlay()
-                    } else {
-                        // Otherwise maintain current state as before
-                        Log.d(TAG, "Could not detect foreground app, maintaining current overlay state")
-                    }
-                }
+        // 设置定期守护，确保服务持续运行
+        setupServiceGuard()
+        
+        startMonitor()
+        
+        // 显示左侧指示器
+        showLeftIndicator()
+    }
+    
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "Service onStartCommand: $intent")
+        
+        // 先创建通知通道（Android O 及以上需要）
+        createNotificationChannel()
+        
+        // 加载封锁状态
+        loadBlockedApps()
+        
+        // 读取自定义屏蔽页配置（来自 ScreenTimeMethod 传入）
+        intent?.getStringExtra(Argument.layoutName)?.let { name ->
+            if (name.isNotBlank()) {
+                selectedLayoutName = name
             }
+        }
+        intent?.getStringExtra(Argument.layoutPackage)?.let { pkg ->
+            if (pkg.isNotBlank()) {
+                selectedLayoutPackage = pkg
+            }
+        }
+        uiTitle = intent?.getStringExtra(Argument.shieldTitle)
+        uiSubtitle = intent?.getStringExtra(Argument.shieldSubtitle)
+        uiTitleColor = intent?.getStringExtra(Argument.shieldSubtitleColor) // 复用键
+        uiSubtitleColor = intent?.getStringExtra(Argument.shieldSubtitleColor)
+        uiButtonLabel = intent?.getStringExtra(Argument.shieldButtonLabel)
+        uiButtonColor = intent?.getStringExtra(Argument.shieldButtonColor)
+        uiButtonTextColor = intent?.getStringExtra(Argument.shieldButtonTextColor)
+        uiIconName = intent?.getStringExtra(Argument.shieldIconName)
+        
+        // 获取被锁定的app数量
+        val blockedCount = blockedPackages.size
+        
+        // 构建通知文案
+        val notificationTitle = if (blockedCount > 0) {
+            getString(R.string.notification_title_with_count, blockedCount)
+        } else {
+            getString(R.string.notification_title)
+        }
+        val notificationText = if (blockedCount > 0) {
+            "正在封锁 $blockedCount 个应用"
+        } else {
+            ""
+        }
+        
+        // 构建并启动前台服务
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(notificationTitle)
+            .setContentText(notificationText)
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .build()
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        
+        return START_STICKY
+    }
+    
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "App Blocking Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            channel.description = "Monitors and blocks restricted apps"
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager?.createNotificationChannel(channel)
         }
     }
-
-    private suspend fun getForegroundApp(): String? = withContext(Dispatchers.IO) {
-        try {
-            val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val endTime = System.currentTimeMillis()
-            
-            // Use a longer time window when the service is resuming from a pause
-            // This helps to get more accurate data after a pause
-            val timeWindow = if (isResuming) {
-                1000 * 60 * 2 // 2 minutes if resuming
+    
+    override fun onBind(intent: Intent): IBinder? = null
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d(TAG, "Service onDestroy called - 尝试重启")
+        
+        executor?.shutdownNow()
+        
+        hideOverlay()
+        removeLeftIndicator()
+        
+        // 通过广播重启服务
+        restartServiceViaBroadcast()
+    }
+    
+    override fun onTaskRemoved(rootIntent: Intent) {
+        super.onTaskRemoved(rootIntent)
+        Log.d(TAG, "onTaskRemoved - 任务被移除")
+        
+        // 通过广播重启服务
+        restartServiceViaBroadcast()
+    }
+    
+    /**
+     * 设置服务守护机制，使用 AlarmManager 定期检查并重启服务
+     */
+    private fun setupServiceGuard() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        if (alarmManager == null) return
+        
+        val intent = Intent(this, ServiceRestartReceiver::class.java)
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            intent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             } else {
-                1000 * 30 // 30 seconds normally
+                PendingIntent.FLAG_UPDATE_CURRENT
             }
-            val beginTime = endTime - timeWindow
-            
-            Log.d(TAG, "Querying usage stats with time window: ${timeWindow/1000} seconds, isResuming: $isResuming")
-
-            // First try to get events
-            val usageEvents = usageStatsManager.queryEvents(beginTime, endTime)
-            var lastForegroundEvent: UsageEvents.Event? = null
-            var eventCount = 0
-
-            while (usageEvents.hasNextEvent()) {
-                val event = UsageEvents.Event()
-                usageEvents.getNextEvent(event)
-                eventCount++
+        )
+        
+        // 每隔 10 秒检查一次服务是否存活
+        val triggerAtMillis = SystemClock.elapsedRealtime() + SERVICE_GUARD_INTERVAL_MS
+        val intervalMillis = SERVICE_GUARD_INTERVAL_MS
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setRepeating(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerAtMillis,
+                intervalMillis,
+                pendingIntent
+            )
+        } else {
+            alarmManager.setRepeating(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerAtMillis,
+                intervalMillis,
+                pendingIntent
+            )
+        }
+        
+        Log.d(TAG, "Service guard 已设置")
+    }
+    
+    /**
+     * 通过广播接收器重启服务
+     */
+    private fun restartServiceViaBroadcast() {
+        val broadcastIntent = Intent(this, ServiceRestartReceiver::class.java)
+        sendBroadcast(broadcastIntent)
+    }
+    
+    private fun loadBlockedApps() {
+        val sharedPreferences = getSharedPreferences(ScreenTimePlugin.PREF_NAME, Context.MODE_PRIVATE)
+        blockEndTime = sharedPreferences.getLong(KEY_BLOCK_END_TIME, 0)
+        blockedPackages.clear()
+        blockedPackages.addAll(
+            sharedPreferences.getStringSet(KEY_BLOCKED_PACKAGES, setOf()) ?: setOf()
+        )
+    }
+    
+    private fun startMonitor() {
+        executor = Executors.newSingleThreadScheduledExecutor()
+        executor?.scheduleAtFixedRate({
+            try {
+                val pkg = getForegroundApp()
+                if (pkg == null) return@scheduleAtFixedRate
                 
-                // Log events if we're resuming to help with debugging
-                if (isResuming && event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                    Log.d(TAG, "Found foreground event: ${event.packageName}, time: ${event.timeStamp}")
+                val now = System.currentTimeMillis()
+                val isBlocked = blockedPackages.contains(pkg)
+                val isWithinBlockTime = now < blockEndTime
+                
+                // 检测应用切换
+                val appChanged = pkg != lastForegroundApp
+                if (appChanged) {
+                    lastForegroundApp = pkg
+                    Log.d(TAG, "应用切换: $pkg isBlocked:$isBlocked")
                 }
                 
-                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                    lastForegroundEvent = event
-                }
-            }
-            
-            Log.d(TAG, "Processed $eventCount usage events")
-
-            // If we found a foreground event, return its package name
-            if (lastForegroundEvent != null) {
-                Log.d(TAG, "Using primary detection method, found: ${lastForegroundEvent.packageName}")
-                return@withContext lastForegroundEvent.packageName
-            }
-            
-            // Fallback: If no events found, try to get usage stats with more careful filtering
-            val stats = usageStatsManager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, beginTime, endTime)
-            if (stats.isNotEmpty()) {
-                // Get the current time for freshness check
-                val currentTime = System.currentTimeMillis()
-                
-                // Filter stats to only include apps that have been used very recently
-                // This helps avoid detecting apps that were used a while ago but aren't currently in foreground
-                val recentlyUsedApps = stats.filter { stat -> 
-                    // Only consider apps used in the last 10 seconds
-                    val timeSinceLastUse = currentTime - stat.lastTimeUsed
-                    val isRecent = timeSinceLastUse < 10000 // 10 seconds
+                // 简化逻辑：需要显示锁屏
+                if (isBlocked && isWithinBlockTime && !isOverlayDisplayed) {
+                    // 防止频繁显示：检查距离上次显示的时间间隔
+                    val timeSinceLastShow = now - lastShowOverlayTime
                     
-                    // Log this for debugging
-                    if (blockedPackages.contains(stat.packageName)) {
-                        Log.d(TAG, "App ${stat.packageName} last used ${timeSinceLastUse}ms ago, isRecent: $isRecent")
+                    if (timeSinceLastShow >= MIN_SHOW_INTERVAL_MS) {
+                        Log.d(TAG, "显示锁屏 - pkg:$pkg")
+                        currentForegroundApp = pkg
+                        lastShowOverlayTime = now
+                        mainHandler.post { showOverlay() }
+                    } else {
+                        Log.d(TAG, "防抖中 - timeSince:$timeSinceLastShow pkg:$pkg")
                     }
-                    
-                    isRecent
                 }
-                
-                // If we have recently used apps, find the most recent one
-                if (recentlyUsedApps.isNotEmpty()) {
-                    val mostRecentApp = recentlyUsedApps.maxByOrNull { it.lastTimeUsed }
-                    if (mostRecentApp != null) {
-                        Log.d(TAG, "Using improved fallback detection method, found: ${mostRecentApp.packageName}")
-                        return@withContext mostRecentApp.packageName
-                    }
-                } else {
-                    Log.d(TAG, "No recently used apps found in fallback detection")
+                // 需要隐藏锁屏
+                else if (isOverlayDisplayed && (!isBlocked || !isWithinBlockTime)) {
+                    mainHandler.post { hideOverlay() }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "监控异常", e)
+            }
+        }, 0, CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS)
+    }
+    
+    private fun getForegroundApp(): String? {
+        return try {
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val time = System.currentTimeMillis()
+            // 优化：减少查询时间窗口从5秒到1秒，提升查询速度
+            val events = usm.queryEvents(time - 1000, time)
+            val event = UsageEvents.Event()
+            var lastResumed: String? = null
+            
+            // 优化：只关注最近的 ACTIVITY_RESUMED 事件
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    lastResumed = event.packageName
+                    Log.d(TAG, "getForegroundApp - 前台应用: $lastResumed")
                 }
             }
-            
-            // If we couldn't find anything, return null
-            null
+            lastResumed
         } catch (e: Exception) {
             Log.e(TAG, "Error getting foreground app", e)
             null
@@ -280,43 +349,244 @@ class BlockAppService : Service() {
     }
 
     private fun showOverlay() {
-        if (!isOverlayDisplayed || overlayView?.windowToken == null) {
+        if (isOverlayDisplayed) return
+        
+        try {
+            // 检查是否过期
+            if (System.currentTimeMillis() >= blockEndTime) {
+                return
+            }
+            
+            // 加载布局
+            overlayView = loadOverlayView(selectedLayoutPackage, selectedLayoutName)
+            
+            // 使用预创建的窗口参数
+            windowManager?.addView(overlayView, overlayParams)
+            isOverlayDisplayed = true
+            
+            // 应用UI配置（容错：仅在id存在时设置）
             try {
-                // If the view was already added but the token is null, remove it first
-                if (isOverlayDisplayed) {
-                    try {
-                        windowManager?.removeView(overlayView)
-                    } catch (e: Exception) {
-                        // Ignore, view might not be attached
+                val resPkg = selectedLayoutPackage ?: packageName
+                // 标题
+                val titleViewId = overlayView?.resources?.getIdentifier("title_text", "id", resPkg)
+                titleViewId?.takeIf { it != 0 }?.let {
+                    val tv = overlayView?.findViewById<android.widget.TextView>(it)
+                    uiTitle?.let { v -> tv?.text = v }
+                    uiTitleColor?.let { c -> runCatching { android.graphics.Color.parseColor(c) }.getOrNull()?.let { color -> tv?.setTextColor(color) } }
+                }
+                // 副标题
+                val subtitleViewId = overlayView?.resources?.getIdentifier("subtitle_text", "id", resPkg)
+                subtitleViewId?.takeIf { it != 0 }?.let {
+                    val tv = overlayView?.findViewById<android.widget.TextView>(it)
+                    uiSubtitle?.let { v -> tv?.text = v }
+                    uiSubtitleColor?.let { c -> runCatching { android.graphics.Color.parseColor(c) }.getOrNull()?.let { color -> tv?.setTextColor(color) } }
+                }
+                // 到期时间显示（time_text）
+                val timeViewId = overlayView?.resources?.getIdentifier("time_text", "id", resPkg)
+                timeViewId?.takeIf { it != 0 }?.let {
+                    val tv = overlayView?.findViewById<android.widget.TextView>(it)
+                    val now = System.currentTimeMillis()
+                    if (blockEndTime > now) {
+                        val hhmm = formatTime(blockEndTime)
+                        val appLabel = resolveAppLabelSafe(currentForegroundApp)
+                        tv?.text = if (appLabel != null) "在 $hhmm 前不使用$appLabel" else ""
+                        tv?.visibility = android.view.View.VISIBLE
+                    } else {
+                        tv?.visibility = android.view.View.GONE
                     }
                 }
-                
-                windowManager?.addView(overlayView, params)
-                isOverlayDisplayed = true
-                Log.d(TAG, "Overlay displayed successfully")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error showing overlay", e)
+                // 按钮
+                val buttonViewId = overlayView?.resources?.getIdentifier("confirm_button", "id", resPkg)
+                buttonViewId?.takeIf { it != 0 }?.let {
+                    val btn = overlayView?.findViewById<android.widget.Button>(it)
+                    uiButtonLabel?.let { v -> btn?.text = v }
+                    var parsedButtonColor: Int? = null
+                    uiButtonColor?.let { c ->
+                        parsedButtonColor = runCatching { android.graphics.Color.parseColor(c) }
+                            .onFailure { exc -> Log.e(TAG, "Invalid shieldButtonColor=$c", exc) }
+                            .getOrNull()
+                    }
+                    uiButtonTextColor?.let { c -> runCatching { android.graphics.Color.parseColor(c) }.getOrNull()?.let { color -> btn?.setTextColor(color) } }
+                    btn?.post {
+                        val buttonColor = parsedButtonColor ?: android.graphics.Color.parseColor("#FF4D4F")
+                        val radiusPx = (btn.height / 2f).takeIf { it > 0 } ?: dpToPxFloat(16f)
+                        val drawable = android.graphics.drawable.GradientDrawable().apply {
+                            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                            cornerRadius = radiusPx
+                            setColor(buttonColor)
+                        }
+                        btn.backgroundTintList = null
+                        btn.stateListAnimator = null
+                        btn.background = drawable
+                    }
+                    // 点击按钮显示桌面
+                    btn?.setOnClickListener {
+                        openOwnAppInBackground()
+                    }
+                }
+                // 图标
+                val iconViewId = overlayView?.resources?.getIdentifier("shield_icon", "id", resPkg)
+                iconViewId?.takeIf { it != 0 }?.let {
+                    val iv = overlayView?.findViewById<android.widget.ImageView>(it)
+                    uiIconName?.let { name ->
+                        val resId = try { createPackageContext(resPkg, 0).resources.getIdentifier(name, "drawable", resPkg) } catch (_: Exception) { 0 }
+                        if (resId != 0) {
+                            val ctx = if (selectedLayoutPackage != null && selectedLayoutPackage != packageName) createPackageContext(resPkg, Context.CONTEXT_IGNORE_SECURITY) else this
+                            val drawable = androidx.core.content.ContextCompat.getDrawable(ctx, resId)
+                            iv?.setImageDrawable(drawable)
+                        }
+                    }
+                }
+            } catch (_: Exception) { /* ignore styling errors */ }
+            
+            // 仅显示遮罩，不再返回桌面
+                    } catch (e: Exception) {
+            // 发生异常时确保状态正确
+            isOverlayDisplayed = false
+            overlayView = null
+            transparentActivityLaunched = false
+            Log.e(TAG, "Error showing overlay", e)
+        }
+    }
+    
+    /**
+     * 启动到桌面，将被阻止的应用顶到后台
+     */
+    private fun openOwnAppInBackground() {
+        try {
+            // 启动到桌面，这样被阻止的应用会真正进入后台
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION
             }
+            startActivity(homeIntent)
+            Log.d(TAG, "已返回桌面，将被阻止的应用顶到后台")
+        } catch (e: Exception) {
+            Log.e(TAG, "返回桌面失败", e)
         }
     }
 
     private fun hideOverlay() {
-        if (isOverlayDisplayed && overlayView?.windowToken != null) {
-            try {
-                windowManager?.removeView(overlayView)
-                isOverlayDisplayed = false
-            } catch (e: Exception) {
-                e.printStackTrace()
+        // 优化：先更新状态，避免重复调用
+        if (!isOverlayDisplayed) return
+        isOverlayDisplayed = false
+        
+        try {
+            if (overlayView != null) {
+                // 优化：使用 removeViewImmediate 立即移除视图
+                windowManager?.removeViewImmediate(overlayView)
+                overlayView = null
             }
+        } catch (e: Exception) {
+            // 静默处理异常
+        } finally {
+            currentForegroundApp = ""
+            // 重置透明Activity启动标记，为下次锁屏做准备
+            transparentActivityLaunched = false
         }
+    }
+    
+    /**
+     * 显示左侧白色半透明竖线指示器
+     */
+    private fun showLeftIndicator() {
+        try {
+            // 先移除旧的指示器（如果存在）
+            removeLeftIndicator()
+            
+            // 创建一个新的View作为指示器
+            indicatorView = View(this)
+            
+            // 创建圆角矩形背景
+            val drawable = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(0x80FFFFFF.toInt()) // 白色半透明 (50%透明度)
+                cornerRadius = dpToPxFloat(5f) // 圆角半径5dp
+            }
+            indicatorView?.background = drawable
+            
+            // 设置窗口参数
+            val params = WindowManager.LayoutParams(
+                dpToPx(5f), // 宽度5dp
+                dpToPx(35f), // 高度35dp
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+                },
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                // 设置位置：左侧居中，距离屏幕左边缘5dp
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                x = dpToPx(5f)
+                y = 10
+            }
+            
+            // 添加到窗口
+            windowManager?.addView(indicatorView, params)
+            } catch (e: Exception) {
+            Log.e(TAG, "显示左侧指示器失败", e)
+        }
+    }
+    
+    /**
+     * 移除左侧指示器
+     */
+    private fun removeLeftIndicator() {
+        try {
+            if (indicatorView != null) {
+                windowManager?.removeView(indicatorView)
+                indicatorView = null
+            }
+        } catch (e: Exception) {
+            // 静默处理异常
+        }
+    }
+    
+    /**
+     * dp转px (返回Int)
+     */
+    private fun dpToPx(dp: Float): Int {
+        val density = resources.displayMetrics.density
+        return (dp * density + 0.5f).toInt()
+    }
+    
+    /**
+     * dp转px (返回Float，用于cornerRadius等需要Float的场景)
+     */
+    private fun dpToPxFloat(dp: Float): Float {
+        val density = resources.displayMetrics.density
+        return dp * density
+    }
+    
+    private fun formatTime(epochMillis: Long): String {
+        return try {
+            val cal = java.util.Calendar.getInstance()
+            cal.timeInMillis = epochMillis
+            val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
+            val m = cal.get(java.util.Calendar.MINUTE)
+            val hh = if (h < 10) "0$h" else "$h"
+            val mm = if (m < 10) "0$m" else "$m"
+            "$hh:$mm"
+        } catch (_: Exception) {
+            ""
+        }
+    }
+    
+    private fun resolveAppLabelSafe(pkg: String?): String? {
+        if (pkg.isNullOrBlank()) return null
+        return try {
+            val pm = applicationContext.packageManager
+            val info = pm.getApplicationInfo(pkg, 0)
+            pm.getApplicationLabel(info)?.toString()
+        } catch (_: Exception) { null }
     }
 
     /**
      * Loads an overlay view from a specified package or creates a default one programmatically
-     * 
-     * @param packageName The package name containing the layout resource (e.g., "com.example.app")
-     * @param layoutName The name of the layout resource without the extension (e.g., "block_overlay")
-     * @return The inflated or created View
      */
     private fun loadOverlayView(packageName: String?, layoutName: String): View {
         try {
@@ -334,19 +604,14 @@ class BlockAppService : Service() {
             // Then try to load from the specified package
             if (packageName != null && packageName != this.packageName) {
                 try {
-                    // Create a context for the package with more permissive flags
                     val flags = Context.CONTEXT_IGNORE_SECURITY or Context.CONTEXT_INCLUDE_CODE
                     val packageContext = createPackageContext(packageName, flags)
                     val layoutId = packageContext.resources.getIdentifier(layoutName, "layout", packageName)
                     
                     if (layoutId != 0) {
                         Log.d(TAG, "Loading layout from host package: $packageName, layout: $layoutName")
-                        
-                        // Use the package context's layout inflater to ensure proper resource resolution
                         val inflater = LayoutInflater.from(packageContext)
                         return inflater.inflate(layoutId, null)
-                    } else {
-                        Log.d(TAG, "Layout resource not found in package: $packageName, layout: $layoutName")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error accessing package context: $packageName", e)
@@ -369,7 +634,11 @@ class BlockAppService : Service() {
         frameLayout.setBackgroundColor(android.graphics.Color.BLACK)
         
         val textView = android.widget.TextView(this)
-        textView.text = getString(R.string.notification_title)
+        textView.text = if (blockedPackages.size > 0) {
+            getString(R.string.notification_title_with_count, blockedPackages.size)
+        } else {
+            getString(R.string.notification_title)
+        }
         textView.setTextColor(android.graphics.Color.WHITE)
         textView.textSize = 24f
         
@@ -380,18 +649,11 @@ class BlockAppService : Service() {
         params.gravity = android.view.Gravity.CENTER
         frameLayout.addView(textView, params)
         
-        // Add a button to close the overlay (for debugging purposes)
+        // Add a button to close the overlay
         val closeButton = android.widget.Button(this)
-        closeButton.text = getString(R.string.close)
+        closeButton.text = "关闭"
         closeButton.setOnClickListener {
-            try {
-                if (isOverlayDisplayed && overlayView?.windowToken != null) {
-                    windowManager?.removeView(overlayView)
-                    isOverlayDisplayed = false
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing overlay", e)
-            }
+            hideOverlay()
         }
         
         val buttonParams = android.widget.FrameLayout.LayoutParams(
@@ -403,289 +665,5 @@ class BlockAppService : Service() {
         frameLayout.addView(closeButton, buttonParams)
         
         return frameLayout
-    }
-    
-    private fun stopBlocking() {
-        try {
-            Log.d(TAG, "Stopping blocking service")
-            // Remove overlay if it exists
-            if (overlayView != null && windowManager != null && isOverlayDisplayed) {
-                windowManager?.removeView(overlayView)
-                isOverlayDisplayed = false
-            }
-            
-            // Clear blocked packages
-            blockedPackages.clear()
-            
-            // Cancel any ongoing coroutines
-            serviceJob.cancel()
-            
-            // Clear shared preferences
-            val sharedPreferences = getSharedPreferences(ScreenTimePlugin.PREF_NAME, Context.MODE_PRIVATE)
-            sharedPreferences.edit().apply {
-                putBoolean(KEY_IS_BLOCKING, false)
-                putStringSet(KEY_BLOCKED_PACKAGES, setOf())
-                putLong(KEY_BLOCK_END_TIME, 0)
-                apply()
-            }
-            
-            // Cancel the service monitor work
-            cancelServiceMonitor()
-            
-            stopSelf()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping service", e)
-        }
-    }
-    
-    override fun onDestroy() {
-        super.onDestroy()
-        try {
-            Log.d(TAG, "onDestroy called")
-            // Remove overlay if it exists
-            if (overlayView != null && windowManager != null && isOverlayDisplayed) {
-                windowManager?.removeView(overlayView)
-                isOverlayDisplayed = false
-            }
-            
-            // Cancel any ongoing coroutines
-            serviceJob.cancel()
-            
-            // Clear resources
-            windowManager = null
-            overlayView = null
-            
-            // Check if we're still in blocking period
-            val sharedPreferences = getSharedPreferences(ScreenTimePlugin.PREF_NAME, Context.MODE_PRIVATE)
-            val isBlocking = sharedPreferences.getBoolean(KEY_IS_BLOCKING, false)
-            val blockEndTime = sharedPreferences.getLong(KEY_BLOCK_END_TIME, 0)
-            
-            if (isBlocking && System.currentTimeMillis() < blockEndTime) {
-                Log.d(TAG, "Service destroyed while still in blocking period, scheduling restart")
-                // Schedule a restart of the service
-                scheduleServiceRestart()
-            } else {
-                blockedPackages.clear()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in onDestroy", e)
-        }
-    }
-    
-    /**
-     * Schedules a periodic work to monitor the service and restart it if it's killed
-     */
-    private fun scheduleServiceMonitor() {
-        try {
-            val workManager = androidx.work.WorkManager.getInstance(applicationContext)
-            
-            // Cancel any existing monitoring work
-            workManager.cancelAllWorkByTag(SERVICE_MONITOR_TAG)
-            
-            // Create a periodic work request to check if service is running
-            val monitorRequest = androidx.work.PeriodicWorkRequestBuilder<ServiceMonitorWorker>(15, java.util.concurrent.TimeUnit.MINUTES)
-                .addTag(SERVICE_MONITOR_TAG)
-                .setBackoffCriteria(
-                    androidx.work.BackoffPolicy.LINEAR,
-                    androidx.work.WorkRequest.MIN_BACKOFF_MILLIS,
-                    java.util.concurrent.TimeUnit.MILLISECONDS
-                )
-                .build()
-            
-            // Enqueue the work
-            workManager.enqueueUniquePeriodicWork(
-                SERVICE_MONITOR_TAG,
-                androidx.work.ExistingPeriodicWorkPolicy.REPLACE,
-                monitorRequest
-            )
-            
-            Log.d(TAG, "Scheduled service monitor work")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error scheduling service monitor", e)
-        }
-    }
-    
-    /**
-     * Cancels the service monitor work
-     */
-    private fun cancelServiceMonitor() {
-        try {
-            val workManager = androidx.work.WorkManager.getInstance(applicationContext)
-            workManager.cancelAllWorkByTag(SERVICE_MONITOR_TAG)
-            Log.d(TAG, "Cancelled service monitor work")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error cancelling service monitor", e)
-        }
-    }
-    
-    /**
-     * Schedules a one-time work to restart the service
-     */
-    private fun scheduleServiceRestart() {
-        try {
-            val workManager = androidx.work.WorkManager.getInstance(applicationContext)
-            
-            // Create a one-time work request to restart the service
-            val restartRequest = androidx.work.OneTimeWorkRequestBuilder<ServiceRestartWorker>()
-                .addTag(SERVICE_RESTART_TAG)
-                .setBackoffCriteria(
-                    androidx.work.BackoffPolicy.LINEAR,
-                    androidx.work.WorkRequest.MIN_BACKOFF_MILLIS,
-                    java.util.concurrent.TimeUnit.MILLISECONDS
-                )
-                .build()
-            
-            // Enqueue the work
-            workManager.enqueueUniqueWork(
-                SERVICE_RESTART_TAG,
-                androidx.work.ExistingWorkPolicy.REPLACE,
-                restartRequest
-            )
-            
-            Log.d(TAG, "Scheduled service restart work")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error scheduling service restart", e)
-        }
-    }
-
-    fun hasUsageStatsPermission(context: Context): Boolean {
-        val appOpsManager = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        val mode = appOpsManager.checkOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            android.os.Process.myUid(),
-            context.packageName
-        )
-
-        return mode == AppOpsManager.MODE_ALLOWED
-    }
-
-    override fun onBind(intent: Intent): IBinder? {
-        return null
-    }
-
-    /**
-     * Immediately fetches the current foreground app after resuming from a pause
-     * This ensures we have the most up-to-date information about the foreground app
-     */
-    private fun immediatelyRefetchForegroundApp() {
-        Log.d(TAG, "Immediately refetching current foreground app after resume")
-        
-        // Set the resuming flag to true for the getForegroundApp method
-        isResuming = true
-        
-        // Launch a coroutine to fetch the foreground app immediately
-        serviceScope.launch {
-            try {
-                // Fetch the current foreground app
-                val currentForegroundApp = getForegroundApp()
-                Log.d(TAG, "After resume, current foreground app is: $currentForegroundApp")
-                
-                // Check if we need to show or hide the overlay based on the current foreground app
-                if (currentForegroundApp != null && 
-                    blockedPackages.contains(currentForegroundApp) && 
-                    !isDeviceLocked(this@BlockAppService)) {
-                    Log.d(TAG, "Showing overlay for blocked app after resume: $currentForegroundApp")
-                    withContext(Dispatchers.Main) {
-                        showOverlay()
-                    }
-                } else {
-                    Log.d(TAG, "Hiding overlay after resume, current app not blocked or null")
-                    withContext(Dispatchers.Main) {
-                        hideOverlay()
-                    }
-                }
-                
-                // Reset the resuming flag after we've done the immediate check
-                isResuming = false
-            } catch (e: Exception) {
-                Log.e(TAG, "Error refetching foreground app after resume", e)
-                isResuming = false
-            }
-        }
-    }
-    
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand called with action: ${intent?.action}")
-        
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        
-        // Check if we're resuming from a pause
-        val isResumingFromPause = intent?.getBooleanExtra("is_resuming", false) ?: false
-        if (isResumingFromPause) {
-            Log.d(TAG, "Service is resuming from pause, will immediately refetch foreground app")
-            // Set the resuming flag to true for the getForegroundApp method
-            isResuming = true
-            // Schedule an immediate refetch of the foreground app
-            immediatelyRefetchForegroundApp()
-        }
-        
-        // Load shared preferences first to ensure we have the latest state
-        val sharedPreferences = getSharedPreferences(ScreenTimePlugin.PREF_NAME, Context.MODE_PRIVATE)
-        
-        // Get packages and duration from intent
-        intent?.let { nonNullIntent ->
-            val packages = nonNullIntent.getStringArrayListExtra(Argument.packagesName)
-            val duration = nonNullIntent.getLongExtra(Argument.duration, 0)
-
-            // Only update if we have new packages
-            if (!packages.isNullOrEmpty()) {
-                Log.d(TAG, "Updating blocked packages from intent: ${packages.joinToString(", ")}")
-                blockedPackages.clear()
-                blockedPackages.addAll(packages)
-                blockEndTime = System.currentTimeMillis() + duration
-                
-                // Save to preferences
-                sharedPreferences.edit().apply {
-                    putBoolean(KEY_IS_BLOCKING, true)
-                    putStringSet(KEY_BLOCKED_PACKAGES, blockedPackages)
-                    putLong(KEY_BLOCK_END_TIME, blockEndTime)
-                    apply()
-                }
-            }
-        }
-        
-        // If no packages were provided in the intent, load from preferences
-        if (blockedPackages.isEmpty()) {
-            blockEndTime = sharedPreferences.getLong(KEY_BLOCK_END_TIME, 0)
-            blockedPackages.addAll(
-                sharedPreferences.getStringSet(KEY_BLOCKED_PACKAGES, setOf()) ?: setOf()
-            )
-            Log.d(TAG, "Loaded blocked packages from preferences: ${blockedPackages.joinToString(", ")}")
-        }
-        
-        // Try to load the layout from the specified package or fall back to a simple programmatic layout
-        overlayView = loadOverlayView(intent?.getStringExtra(Argument.layoutPackage), intent?.getStringExtra(Argument.layoutName) ?: DEFAULT_LAYOUT_NAME)
-
-        // Check if blocking period has ended
-        if (System.currentTimeMillis() >= blockEndTime || blockedPackages.isEmpty()) {
-            Log.d(TAG, "Blocking period has ended or no packages to block")
-            stopBlocking()
-            return START_NOT_STICKY
-        }
-
-        // Create notification channel
-        val channel = NotificationChannel(CHANNEL_ID, "BlockAppService Channel", NotificationManager.IMPORTANCE_LOW)
-        channel.setShowBadge(false)
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(channel)
-
-        // Get notification parameters from intent (already formatted by ScreenTimeMethod)
-        val notificationTitle = intent?.getStringExtra(Argument.notificationTitle) ?: getString(R.string.notification_title)
-        val notificationText = intent?.getStringExtra(Argument.notificationText)
-            ?: "Blocking ${blockedPackages.size} apps"
-        
-        // Create the notification
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(notificationTitle)
-            .setContentText(notificationText)
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setOngoing(true)
-            .build()
-
-        startForeground(NOTIFICATION_ID, notification)
-        startBlockingApps()
-
-        // Return START_REDELIVER_INTENT to ensure the service is restarted with the same intent if killed
-        return START_REDELIVER_INTENT
     }
 }

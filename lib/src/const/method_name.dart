@@ -1,8 +1,9 @@
 class MethodName {
   static const installedApps = "installedApps";
   static const requestPermission = 'requestPermission';
-  static const appUsageData = 'appUsageData';
   static const permissionStatus = 'permissionStatus';
+  static const checkPermissions = 'checkPermissions';
+  static const appUsageData = 'appUsageData';
   static const blockApps = 'blockApps';
   static const scheduleBlock = 'scheduleBlock';
   static const cancelScheduledBlock = 'cancelScheduledBlock';

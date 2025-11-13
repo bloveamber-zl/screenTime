@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.solusibejo.screen_time.ScreenTimePlugin
+import com.solusibejo.screen_time.receiver.AlarmReceiver
 import com.solusibejo.screen_time.service.BlockAppService
 import com.solusibejo.screen_time.worker.ServiceRestartWorker
 import java.util.concurrent.TimeUnit

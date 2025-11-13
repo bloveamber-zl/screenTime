@@ -4,9 +4,15 @@ import android.app.Activity
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.graphics.Color
 import android.view.View
 import android.view.ViewGroup
-import android.widget.*
+import android.widget.BaseAdapter
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
 
 class AppSelectionActivity : Activity() {
   private lateinit var listView: ListView
@@ -18,14 +24,25 @@ class AppSelectionActivity : Activity() {
     val root = LinearLayout(this)
     root.orientation = LinearLayout.VERTICAL
     val title = TextView(this)
-    title.text = "选择要限制的应用"
+    val shieldTitle = intent.getStringExtra("shieldTitle")
+    title.text = shieldTitle ?: "选择要限制的应用"
     title.textSize = 18f
     title.setPadding(32, 32, 32, 16)
     listView = ListView(this)
     btnCancel = Button(this)
-    btnCancel.text = "取消"
+    btnCancel.text = intent.getStringExtra("cancelButtonLabel") ?: "取消"
     btnDone = Button(this)
-    btnDone.text = "完成"
+    btnDone.text = intent.getStringExtra("confirmButtonLabel") ?: "完成"
+    intent.getStringExtra("confirmButtonColor")?.let {
+      runCatching { Color.parseColor(it) }.getOrNull()?.let { color ->
+        btnDone.setBackgroundColor(color)
+      }
+    }
+    intent.getStringExtra("confirmButtonTextColor")?.let {
+      runCatching { Color.parseColor(it) }.getOrNull()?.let { color ->
+        btnDone.setTextColor(color)
+      }
+    }
     val btnRow = LinearLayout(this)
     btnRow.orientation = LinearLayout.HORIZONTAL
     btnRow.addView(btnCancel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -76,7 +93,9 @@ class AppSelectionActivity : Activity() {
     }
 
     btnCancel.setOnClickListener {
-      setResult(Activity.RESULT_CANCELED)
+      val data = intent
+      data.putExtra("success", false)
+      setResult(Activity.RESULT_OK, data)
       finish()
     }
 
@@ -89,8 +108,10 @@ class AppSelectionActivity : Activity() {
       editor.putInt("${selectionStorageKey}_total_selected", appCount)
       editor.apply()
       val data = intent
+      data.putExtra("success", true)
       data.putExtra("appCount", appCount)
       data.putExtra("categoryCount", 0)
+      data.putStringArrayListExtra("packages", ArrayList(savedPackages))
       setResult(Activity.RESULT_OK, data)
       finish()
     }

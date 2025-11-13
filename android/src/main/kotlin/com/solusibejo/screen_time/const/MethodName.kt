@@ -3,6 +3,7 @@ package com.solusibejo.screen_time.const
 object MethodName {
     const val requestPermission = "requestPermission"
     const val permissionStatus = "permissionStatus"
+    const val checkPermissions = "checkPermissions"
     const val installedApps = "installedApps"
     const val appUsageData = "appUsageData"
     const val blockApps = "blockApps"
@@ -24,4 +25,6 @@ object MethodName {
     const val getFamilyControlsAuthorizationStatus = "getFamilyControlsAuthorizationStatus"
     const val requestFamilyControlsAuthorization = "requestFamilyControlsAuthorization"
     const val clearAllShields = "clearAllShields"
+    const val getExtensionDebugInfo = "getExtensionDebugInfo"
+    const val getBlockingStatus = "getBlockingStatus"
 }
