@@ -16,7 +16,7 @@ class _AppMonitoringSettingsScreenState
     extends State<AppMonitoringSettingsScreen>
     with WidgetsBindingObserver {
   final ScreenTime _screenTime = ScreenTime();
-  bool _isServiceEnabled = false;
+  bool _hasUsagePermission = false;
   UsageInterval _selectedInterval = UsageInterval.daily;
   int _lookbackTime = 10; // seconds
 
@@ -50,49 +50,31 @@ class _AppMonitoringSettingsScreenState
 
   Future<void> _checkServiceStatus() async {
     final result = await _screenTime.permissionStatus(
-      permissionType: ScreenTimePermissionType.accessibilitySettings,
+      permissionType: ScreenTimePermissionType.appUsage,
     );
     setState(() {
-      _isServiceEnabled = result == ScreenTimePermissionStatus.approved;
+      _hasUsagePermission = result == ScreenTimePermissionStatus.approved;
     });
   }
 
-  Future<void> _openAccessibilitySettings() async {
+  Future<void> _openUsageAccessSettings() async {
     await _screenTime.requestPermission(
-      permissionType: ScreenTimePermissionType.accessibilitySettings,
+      permissionType: ScreenTimePermissionType.appUsage,
     );
     // Wait a bit before checking status again
     await Future.delayed(const Duration(seconds: 3));
     await _checkServiceStatus();
   }
 
-  Future<void> _configureService(BuildContext context) async {
-    final ctx = context;
-    final success = await _screenTime.configureAppMonitoringService(
-      interval: _selectedInterval,
-      lookbackTimeMs: _lookbackTime * 1000,
-    );
-
-    if (!ctx.mounted) return;
-    ScaffoldMessenger.of(ctx).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Service configured successfully'
-              : 'Failed to configure service',
-        ),
-      ),
-    );
-
-    // After configuring, start monitoring if service is enabled
-    if (success && _isServiceEnabled) {
-      _startMonitoring();
-    }
-  }
-
   // Start monitoring app usage with streaming approach
   Future<void> _startMonitoring() async {
     if (_isMonitoring) return;
+    if (!_hasUsagePermission) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先授予“使用情况访问”权限后再开始监控')));
+      return;
+    }
 
     try {
       // Initialize with current data
@@ -116,19 +98,24 @@ class _AppMonitoringSettingsScreenState
       });
 
       // Start streaming updates
-      _appUsageSubscription = _screenTime.streamAppUsage().listen(
-        (appData) {
-          if (mounted) {
-            setState(() {
-              _currentAppData = appData;
-              _addToHistory(appData);
-            });
-          }
-        },
-        onError: (error) {
-          debugPrint('Stream error: $error');
-        },
-      );
+      _appUsageSubscription = _screenTime
+          .streamAppUsage(
+            usageInterval: _selectedInterval,
+            lookbackTimeMs: _lookbackTime * 1000,
+          )
+          .listen(
+            (appData) {
+              if (mounted) {
+                setState(() {
+                  _currentAppData = appData;
+                  _addToHistory(appData);
+                });
+              }
+            },
+            onError: (error) {
+              debugPrint('Stream error: $error');
+            },
+          );
     } catch (e) {
       debugPrint('Error starting monitoring: $e');
       setState(() {
@@ -198,7 +185,7 @@ class _AppMonitoringSettingsScreenState
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'App Monitoring Service',
+                      'Usage Access Permission',
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
@@ -208,17 +195,20 @@ class _AppMonitoringSettingsScreenState
                     Row(
                       children: [
                         Icon(
-                          _isServiceEnabled ? Icons.check_circle : Icons.error,
-                          color: _isServiceEnabled ? Colors.green : Colors.red,
+                          _hasUsagePermission
+                              ? Icons.check_circle
+                              : Icons.error,
+                          color:
+                              _hasUsagePermission ? Colors.green : Colors.red,
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          _isServiceEnabled
-                              ? 'Service is enabled'
-                              : 'Service is disabled',
+                          _hasUsagePermission
+                              ? 'Permission granted'
+                              : 'Permission required',
                           style: TextStyle(
                             color:
-                                _isServiceEnabled ? Colors.green : Colors.red,
+                                _hasUsagePermission ? Colors.green : Colors.red,
                           ),
                         ),
                       ],
@@ -227,8 +217,8 @@ class _AppMonitoringSettingsScreenState
                     Row(
                       children: [
                         ElevatedButton(
-                          onPressed: _openAccessibilitySettings,
-                          child: const Text('Open Accessibility Settings'),
+                          onPressed: _openUsageAccessSettings,
+                          child: const Text('Open Usage Access Settings'),
                         ),
                         IconButton(
                           onPressed: () => _checkServiceStatus(),
@@ -244,7 +234,7 @@ class _AppMonitoringSettingsScreenState
             const SizedBox(height: 24),
 
             // Service configuration
-            if (_isServiceEnabled) ...[
+            if (_hasUsagePermission) ...[
               const Text(
                 'Configure Monitoring',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -293,14 +283,6 @@ class _AppMonitoringSettingsScreenState
               ),
 
               const SizedBox(height: 16),
-
-              // Apply button
-              ElevatedButton(
-                onPressed: () => _configureService(context),
-                child: const Text('Apply Configuration'),
-              ),
-
-              const SizedBox(height: 24),
 
               // Monitoring controls
               Card(

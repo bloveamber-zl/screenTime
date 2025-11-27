@@ -233,10 +233,10 @@ class ScreenTime {
     );
   }
 
-  /// Stream app usage data in real-time.
+  /// Stream app usage data in near real-time.
   ///
-  /// This method returns a Stream that emits events whenever the foreground app changes.
-  /// It uses the native AppMonitoringService to provide real-time updates.
+  /// This method returns a Stream that emits events whenever the foreground app
+  /// changes by polling UsageStatsManager.
   ///
   /// Parameters:
   /// - `usageInterval`: The interval to use for usage stats queries (DAILY, WEEKLY, MONTHLY, YEARLY, BEST)
@@ -249,23 +249,6 @@ class ScreenTime {
   }) {
     return ScreenTimePlatform.instance.streamAppUsage(
       usageInterval: usageInterval,
-      lookbackTimeMs: lookbackTimeMs,
-    );
-  }
-
-  /// Configures the app monitoring service with the specified interval and lookback time
-  ///
-  /// Parameters:
-  /// - `interval`: The interval to use for usage stats queries (DAILY, WEEKLY, MONTHLY, YEARLY, BEST)
-  /// - `lookbackTimeMs`: How far back in time to look for app usage data (in milliseconds)
-  ///
-  /// Returns `true` if the service was configured successfully, `false` otherwise
-  Future<bool> configureAppMonitoringService({
-    UsageInterval interval = UsageInterval.daily,
-    int lookbackTimeMs = 10000, // Default: 10 seconds
-  }) {
-    return ScreenTimePlatform.instance.configureAppMonitoringService(
-      interval: interval,
       lookbackTimeMs: lookbackTimeMs,
     );
   }

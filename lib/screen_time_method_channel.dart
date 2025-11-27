@@ -282,32 +282,10 @@ class MethodChannelScreenTime extends ScreenTimePlatform {
   }
 
   @override
-  Future<bool> configureAppMonitoringService({
-    UsageInterval interval = UsageInterval.daily,
-    int lookbackTimeMs = 10000, // Default: 10 seconds
-  }) async {
-    final result = await methodChannel.invokeMethod<bool>(
-      MethodName.configureAppMonitoringService,
-      {
-        Argument.interval: interval.name,
-        Argument.lookbackTimeMs: lookbackTimeMs,
-      },
-    );
-    return result ?? false;
-  }
-
-  @override
   Stream<Map<String, dynamic>> streamAppUsage({
     UsageInterval usageInterval = UsageInterval.daily,
     int lookbackTimeMs = 10000,
   }) {
-    // First configure the service with the specified parameters
-    configureAppMonitoringService(
-      interval: usageInterval,
-      lookbackTimeMs: lookbackTimeMs,
-    );
-
-    // Return the stream from the event channel
     return eventChannel.receiveBroadcastStream({
       Argument.interval: usageInterval.name,
       Argument.lookbackTimeMs: lookbackTimeMs,

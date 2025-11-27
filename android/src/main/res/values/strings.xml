@@ -4,5 +4,4 @@
     <string name="notification_title_with_count">正在封锁 %1$d 个应用</string>
     <string name="notification_text">Blocking %1$s apps, for %2$s</string>
     <string name="close">Close</string>
-    <string name="accessibility_service_description">Screen Time需要无障碍服务权限来监控和屏蔽应用使用</string>
 </resources>

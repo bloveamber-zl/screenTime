@@ -9,7 +9,7 @@ import com.solusibejo.screen_time.const.Field
 import com.solusibejo.screen_time.const.MethodName
 import com.solusibejo.screen_time.const.ScreenTimePermissionType
 import com.solusibejo.screen_time.const.UsageInterval
-import com.solusibejo.screen_time.service.AppMonitoringService
+import com.solusibejo.screen_time.monitor.UsageStatsMonitor
 import com.solusibejo.screen_time.service.BlockAppService
 import com.solusibejo.screen_time.util.EnumExtension.toCamelCase
 import com.solusibejo.screen_time.util.EnumExtension.toEnumFormat
@@ -52,6 +52,7 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
   private var pendingSelectionStorageKey: String = "screenTimeSelection"
   private var pendingPickEndTimeMs: Long? = null
   private var pendingShieldConfig: Map<String, String?>? = null
+  private var usageStatsMonitor: UsageStatsMonitor? = null
 
   companion object {
     const val PREF_NAME = "screen_time"
@@ -350,22 +351,6 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
           val error = data[Field.error]
           result.error("500", "Failed to start monitoring app usage", error)
         }
-      }
-      MethodName.configureAppMonitoringService -> {
-        val args = call.arguments as Map<String, Any?>
-        val interval = args[Argument.interval] as String
-        val lookbackTimeMs = when (val value = args[Argument.lookbackTimeMs]) {
-          is Int -> value.toLong()
-          is Long -> value
-          is Number -> value.toLong()
-          else -> 10000L
-        }
-        
-        val data = ScreenTimeMethod.configureAppMonitoringService(
-          UsageInterval.valueOf(interval.uppercase(Locale.getDefault())),
-          lookbackTimeMs,
-        )
-        result.success(data)
       }
       MethodName.pauseBlockApps -> {
         val args = call.arguments as Map<String, Any?>
@@ -676,25 +661,34 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
       // Extract parameters from arguments
       val args = arguments as? Map<*, *>
       val intervalName = args?.get(Argument.interval) as? String ?: UsageInterval.DAILY.name
-      val lookbackTimeMs = args?.get(Argument.lookbackTimeMs) as? Int ?: 10000
-      
-      // Configure the service with the specified parameters
-      AppMonitoringService.configure(
-          UsageInterval.valueOf(intervalName.uppercase(Locale.getDefault())),
-          lookbackTimeMs.toLong()
-      )
-      
-      // Set up the app change listener
-      AppMonitoringService.setAppChangeListener(object : AppMonitoringService.AppChangeListener {
-        override fun onAppChanged(appData: Map<String, Any?>) {
-          eventSink?.success(appData)
-        }
-      })
-      
-      // Start the service if it's not already running
-      val appMonitoringService = AppMonitoringService.getInstance(context)
-      if (appMonitoringService != null && !appMonitoringService.isRunning) {
-        appMonitoringService.startMonitoring()
+      val usageInterval = UsageInterval.valueOf(intervalName.uppercase(Locale.getDefault()))
+      val lookbackArg = args?.get(Argument.lookbackTimeMs)
+      val lookbackTimeMs = when (lookbackArg) {
+        is Int -> lookbackArg.toLong()
+        is Long -> lookbackArg
+        is Number -> lookbackArg.toLong()
+        else -> 10000L
+      }
+
+      if (!ScreenTimeMethod.checkIfStatsAreAvailable(context, usageInterval)) {
+        eventSink?.error(
+          "PERMISSION_DENIED",
+          "Usage access permission is required to stream app usage data.",
+          null
+        )
+        eventSink = null
+        return
+      }
+
+      usageStatsMonitor?.stop()
+      usageStatsMonitor = UsageStatsMonitor(
+        context = context,
+        interval = usageInterval,
+        lookbackTimeMs = lookbackTimeMs
+      ) { appData ->
+        eventSink?.success(appData)
+      }.also { monitor ->
+        monitor.start()
       }
     } catch (e: Exception) {
       eventSink?.error("500", "Failed to start app usage streaming", e.message)
@@ -706,13 +700,8 @@ class ScreenTimePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHan
     try {
       // Clean up resources when the stream is cancelled
       eventSink = null
-      AppMonitoringService.setAppChangeListener(null)
-      
-      // Stop the service if no other listeners are active
-      if (AppMonitoringService.listenerCount == 0) {
-        val appMonitoringService = AppMonitoringService.getInstance(context)
-        appMonitoringService?.stopMonitoring()
-      }
+      usageStatsMonitor?.stop()
+      usageStatsMonitor = null
     } catch (e: Exception) {
       // Log the error but don't throw as we're cleaning up
       android.util.Log.e("ScreenTimePlugin", "Error cleaning up stream: ${e.message}")

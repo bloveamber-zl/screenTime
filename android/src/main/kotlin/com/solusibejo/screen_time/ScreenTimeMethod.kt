@@ -36,9 +36,9 @@ import com.solusibejo.screen_time.const.UsageInterval
 import com.solusibejo.screen_time.manager.BlockScheduleManager
 import com.solusibejo.screen_time.model.BlockSchedule
 import com.solusibejo.screen_time.receiver.AlarmReceiver
-import com.solusibejo.screen_time.service.AppMonitoringService
 import com.solusibejo.screen_time.service.BlockAppService
 import com.solusibejo.screen_time.service.PauseNotificationService
+import com.solusibejo.screen_time.monitor.UsageStatsMonitorRegistry
 import com.solusibejo.screen_time.util.ApplicationInfoUtil
 import com.solusibejo.screen_time.util.DurationUtil.inString
 import com.solusibejo.screen_time.util.IntExtension.timeInString
@@ -216,16 +216,6 @@ object ScreenTimeMethod {
                     false
                 }
             }
-            ScreenTimePermissionType.ACCESSIBILITY_SETTINGS -> {
-                try {
-                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    context.startActivity(intent)
-                    true
-                } catch (e: Exception) {
-                    false
-                }
-            }
             ScreenTimePermissionType.DRAW_OVERLAY -> {
                 try {
                     if (!Settings.canDrawOverlays(context)) {
@@ -296,14 +286,6 @@ object ScreenTimeMethod {
                     else -> {
                         ScreenTimePermissionStatus.NOT_DETERMINED
                     }
-                }
-            }
-            ScreenTimePermissionType.ACCESSIBILITY_SETTINGS -> {
-                val result = AppMonitoringService.isServiceRunning(context)
-                return if(result){
-                    ScreenTimePermissionStatus.APPROVED
-                } else {
-                    ScreenTimePermissionStatus.DENIED
                 }
             }
             ScreenTimePermissionType.DRAW_OVERLAY -> {
@@ -488,8 +470,7 @@ object ScreenTimeMethod {
         if (packagesName.isEmpty()) return false
 
         try {
-            // Calm architecture: no longer require AccessibilityService for blocking
-            // (we rely on a foreground service + overlay). Keep overlay permission check below.
+            // Blocking now relies on a foreground service + overlay. Keep overlay permission check below.
             Log.d("ScreenTimeMethod", "blockApps() called with args: " +
                     "packages=${packagesName.joinToString()}, " +
                     "layoutName=$layoutName, " +
@@ -528,10 +509,6 @@ object ScreenTimeMethod {
                     "endTime=${sharedPreferences.getLong(BlockAppService.KEY_BLOCK_END_TIME, 0)}, " +
                     "packages=${sharedPreferences.getStringSet(BlockAppService.KEY_BLOCKED_PACKAGES, setOf())?.joinToString()}")
 
-            // Update AccessibilityService blocking state (real-time detection)
-            AppMonitoringService.updateBlockingState(context, packagesName.toSet(), computedEndTime)
-            Log.d("ScreenTimeMethod", "AppMonitoringService.updateBlockingState invoked")
-
             // Schedule WorkManager to unblock at end time (backup mechanism)
             scheduleWorkManagerUnblock(context, durationMillis)
             Log.d("ScreenTimeMethod", "Unblock scheduled via WorkManager after ${durationMillis}ms")
@@ -564,7 +541,7 @@ object ScreenTimeMethod {
             }
             Log.d("ScreenTimeMethod", "BlockAppService start requested (SDK=${Build.VERSION.SDK_INT})")
 
-            Log.d("ScreenTimeMethod", "Blocking ${packagesName.size} apps until $computedEndTime using AccessibilityService + WorkManager")
+            Log.d("ScreenTimeMethod", "Blocking ${packagesName.size} apps until $computedEndTime using overlay service + WorkManager")
             return true
         } catch (e: Exception) {
             Log.e("ScreenTimeMethod", "Error starting block", e)
@@ -574,7 +551,7 @@ object ScreenTimeMethod {
     
     /**
      * Schedule WorkManager to unblock apps at the end time
-     * This serves as a backup mechanism in case AccessibilityService fails
+     * This serves as a backup mechanism in case the foreground service fails
      */
     private fun scheduleWorkManagerUnblock(context: Context, durationMillis: Long) {
         try {
@@ -780,9 +757,6 @@ object ScreenTimeMethod {
                 apply()
             }
             
-            // Clear AccessibilityService blocking state
-            AppMonitoringService.clearBlockingState(context)
-            
             // Cancel WorkManager unblock task (if any)
             cancelWorkManagerUnblock(context)
             
@@ -797,7 +771,7 @@ object ScreenTimeMethod {
                 }
             }
             
-            Log.d("ScreenTimeMethod", "Unblocked apps using AccessibilityService + WorkManager")
+            Log.d("ScreenTimeMethod", "Unblocked apps using overlay service + WorkManager")
             return true
         } catch (e: Exception) {
             Log.e("ScreenTimeMethod", "Error in unblockApps", e)
@@ -1065,7 +1039,7 @@ object ScreenTimeMethod {
             }
         }
 
-        result["monitoringServiceRunning"] = AppMonitoringService.isServiceRunning(context)
+        result["monitoringServiceRunning"] = UsageStatsMonitorRegistry.isRunning()
         result["blockServiceRunning"] = ServiceUtil.isRunning(context, BlockAppService::class.java.name)
         result["pauseNotificationRunning"] =
             ServiceUtil.isRunning(context, PauseNotificationService::class.java.name)
@@ -1140,28 +1114,6 @@ object ScreenTimeMethod {
                 Field.status to false,
                 Field.error to exception.localizedMessage,
             )
-        }
-    }
-    
-    /**
-     * Configures the app monitoring service with specified parameters.
-     * Sets the interval and lookback time for usage stats queries.
-     *
-     * @param interval The interval to use for usage stats queries (DAILY, WEEKLY, MONTHLY, YEARLY, BEST)
-     * @param lookbackTimeMs How far back in time to look for app usage data (in milliseconds)
-     * @return Boolean indicating if the service was configured successfully
-     */
-    fun configureAppMonitoringService(
-        interval: UsageInterval = UsageInterval.DAILY,
-        lookbackTimeMs: Long = 10 * 1000 // Default: 10 seconds lookback
-    ): Boolean {
-        try {
-            // Configure the service
-            AppMonitoringService.setInterval(interval)
-            AppMonitoringService.setLookbackTime(lookbackTimeMs)
-            return true
-        } catch (e: Exception) {
-            return false
         }
     }
     

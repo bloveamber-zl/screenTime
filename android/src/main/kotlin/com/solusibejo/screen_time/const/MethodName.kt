@@ -15,7 +15,6 @@ object MethodName {
     const val pauseBlockApps = "pauseBlockApps"
     const val isBlockingPaused = "isBlockingPaused"
     const val monitoringAppUsage = "monitoringAppUsage"
-    const val configureAppMonitoringService = "configureAppMonitoringService"
 
     // iOS parity methods
     const val pickApps = "pickApps"

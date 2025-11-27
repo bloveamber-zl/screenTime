@@ -6,15 +6,13 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.solusibejo.screen_time.ScreenTimePlugin
-import com.solusibejo.screen_time.service.AppMonitoringService
 import com.solusibejo.screen_time.service.BlockAppService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
  * Worker responsible for unblocking apps after the block duration has expired
- * This serves as a backup mechanism to ensure apps are unblocked even if AccessibilityService fails
- * Works with both BlockAppService (foreground service) and AppMonitoringService (AccessibilityService)
+ * This serves as a backup mechanism to ensure apps are unblocked even if the foreground service fails
  */
 class UnblockWorker(
     context: Context,
@@ -53,9 +51,6 @@ class UnblockWorker(
                     apply()
                 }
                 
-                // Clear AccessibilityService blocking state (if using AccessibilityService)
-                AppMonitoringService.clearBlockingState(applicationContext)
-                
                 // Stop BlockAppService if it's running (if using foreground service)
                 if (BlockAppService.isServiceRunning(applicationContext)) {
                     Log.d(TAG, "Stopping BlockAppService")
@@ -77,7 +72,6 @@ class UnblockWorker(
                     putLong(BlockAppService.KEY_BLOCK_END_TIME, 0)
                     apply()
                 }
-                AppMonitoringService.clearBlockingState(applicationContext)
             }
             
             Result.success()

@@ -40,7 +40,7 @@ abstract class ScreenTimePlatform extends PlatformInterface {
   /// - `status`: The current authorization status `true` is requested `false`: failed to request.
   /// - `error`: Error message if failed to request.
   /// appUsage: Request permission to access app usage data.
-  /// accessibilitySettings: Opens the system accessibility settings screen. This allows users to enable the app monitoring service
+  /// drawOverlay: Opens the system overlay permission screen so blocking UI can be rendered.
   ///
   /// Returns `true` if the settings screen was opened successfully,
   /// `false` otherwise
@@ -161,25 +161,10 @@ abstract class ScreenTimePlatform extends PlatformInterface {
     throw UnimplementedError('monitoringAppUsage() has not been implemented.');
   }
 
-  /// Configures the app monitoring service with the specified interval and lookback time
+  /// Stream app usage data in near real-time.
   ///
-  /// Parameters:
-  /// - `interval`: The interval to use for usage stats queries (DAILY, WEEKLY, MONTHLY, YEARLY, BEST)
-  /// - `lookbackTimeMs`: How far back in time to look for app usage data (in milliseconds)
-  ///
-  /// Returns `true` if the service was configured successfully, `false` otherwise
-  Future<bool> configureAppMonitoringService({
-    UsageInterval interval = UsageInterval.daily,
-    int lookbackTimeMs = 10000,
-  }) {
-    throw UnimplementedError(
-        'configureAppMonitoringService() has not been implemented.');
-  }
-
-  /// Stream app usage data in real-time.
-  ///
-  /// This method returns a Stream that emits events whenever the foreground app changes.
-  /// It uses the native AppMonitoringService to provide real-time updates.
+  /// This method returns a Stream that emits events whenever the foreground app
+  /// changes by periodically polling UsageStatsManager.
   ///
   /// Parameters:
   /// - `usageInterval`: The interval to use for usage stats queries (DAILY, WEEKLY, MONTHLY, YEARLY, BEST)

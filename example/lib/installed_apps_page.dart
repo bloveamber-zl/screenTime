@@ -67,10 +67,6 @@ class _InstalledAppsPageState extends State<InstalledAppsPage>
     final notificationPermission = await _screenTime.permissionStatus(
       permissionType: ScreenTimePermissionType.notification,
     );
-    final accessibiltySettingsPermission = await _screenTime.permissionStatus(
-      permissionType: ScreenTimePermissionType.accessibilitySettings,
-    );
-
     final isOnBlocking = await _screenTime.isOnBlockingApps;
     final isOnPaused = await _screenTime.isOnPausedBlockingApps;
 
@@ -105,35 +101,6 @@ class _InstalledAppsPageState extends State<InstalledAppsPage>
                       appUsageContext,
                       MaterialPageRoute(
                         builder: (context) => AppUsagePage(apps: result),
-                      ),
-                    );
-                  } else {
-                    Navigator.pop(modalContext);
-                  }
-                },
-              ),
-              ListTile(
-                leading: Icon(Icons.monitor),
-                title: Text(
-                  (accessibiltySettingsPermission ==
-                          ScreenTimePermissionStatus.approved)
-                      ? 'App Monitoring'
-                      : 'Need Request App Monitoring Permission',
-                ),
-                onTap: () async {
-                  if (accessibiltySettingsPermission ==
-                      ScreenTimePermissionStatus.approved) {
-                    final appMonitoringContext = modalContext;
-                    Navigator.push(
-                      appMonitoringContext,
-                      MaterialPageRoute(
-                        builder:
-                            (context) => AppMonitoringSettingsScreen(
-                              packagesName:
-                                  _selectedApp
-                                      .map((app) => app.packageName ?? '')
-                                      .toList(),
-                            ),
                       ),
                     );
                   } else {
@@ -225,13 +192,12 @@ class _InstalledAppsPageState extends State<InstalledAppsPage>
               ListTile(
                 leading: Icon(Icons.monitor),
                 title: Text(
-                  (accessibiltySettingsPermission ==
-                          ScreenTimePermissionStatus.approved)
+                  (appUsagePermission == ScreenTimePermissionStatus.approved)
                       ? 'App Monitoring'
-                      : 'Need Request App Monitoring Permission',
+                      : 'Need Usage Access Permission',
                 ),
                 onTap: () async {
-                  if (accessibiltySettingsPermission ==
+                  if (appUsagePermission ==
                       ScreenTimePermissionStatus.approved) {
                     final appMonitoringContext = modalContext;
                     Navigator.push(

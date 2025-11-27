@@ -25,13 +25,6 @@ class MockScreenTimePlatform
   }
 
   @override
-  Future<bool> configureAppMonitoringService(
-      {UsageInterval interval = UsageInterval.daily,
-      int lookbackTimeMs = 10000}) {
-    throw UnimplementedError();
-  }
-
-  @override
   Future<MonitoringAppUsage> monitoringAppUsage({
     int startHour = 0,
     int startMinute = 0,
@@ -81,6 +74,14 @@ class MockScreenTimePlatform
     String? notificationTitle,
     String? notificationText,
     required DateTime endTime,
+    String? shieldTitle,
+    String? shieldSubtitle,
+    String? shieldTitleColor,
+    String? shieldSubtitleColor,
+    String? shieldButtonLabel,
+    String? shieldButtonColor,
+    String? shieldButtonTextColor,
+    String? shieldIconName,
   }) async {
     return true;
   }

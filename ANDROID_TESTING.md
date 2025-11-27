@@ -176,7 +176,7 @@ print('清除结果: $success');
 **预期日志**：
 
 ```
-D/ScreenTimeMethod: Unblocked apps using AccessibilityService + WorkManager
+D/ScreenTimeMethod: Unblocked apps using overlay service + WorkManager
 D/ScreenTimeMethod: Stopping BlockAppService
 D/BlockAppService: Service onDestroy called
 ```

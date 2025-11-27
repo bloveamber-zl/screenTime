@@ -36,51 +36,14 @@ The core permissions required by this plugin are already declared in the plugin'
 
 You don't need to add these permissions to your app's AndroidManifest.xml as they're automatically merged during the build process.
 
-#### 2. Implement the Accessibility Service
+#### 2. Runtime Permission Guidance
 
-To monitor app usage in real-time, you need to implement an accessibility service in your app. Follow these steps:
+Real-time monitoring now relies on two runtime permissions instead of an AccessibilityService:
 
-##### a. Create accessibility service configuration
+- **Usage Access** (`PACKAGE_USAGE_STATS`): required for reading the current foreground app via `UsageStatsManager`.
+- **Draw over other apps** (`SYSTEM_ALERT_WINDOW`): required for displaying the blocking overlay UI.
 
-Create a file at `android/app/src/main/res/xml/accessibility_service_config.xml` with the following content:
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:description="@string/accessibility_service_description"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
-    android:accessibilityFeedbackType="feedbackGeneric"
-    android:notificationTimeout="50"
-    android:canRetrieveWindowContent="true"
-    android:canPerformGestures="false" />
-```
-
-##### b. Add service description
-
-Add the following string to `android/app/src/main/res/values/strings.xml`:
-
-```xml
-<string name="accessibility_service_description">This service monitors app usage in real-time and provides detailed information about the apps you use.</string>
-```
-
-##### c. Register the service
-
-Add the following service declaration to your app's `AndroidManifest.xml` within the `<application>` tag:
-
-```xml
-<service
-    android:name="com.solusibejo.screen_time.service.AppMonitoringService"
-    android:label="App Monitoring Service"
-    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-    android:exported="false">
-    <intent-filter>
-        <action android:name="android.accessibilityservice.AccessibilityService" />
-    </intent-filter>
-    <meta-data
-        android:name="android.accessibilityservice"
-        android:resource="@xml/accessibility_service_config" />
-</service>
-```
+Use `ScreenTime.requestPermission` to guide users to the corresponding system settings pages.
 
 ## Usage
 
@@ -99,28 +62,15 @@ if (permissionStatus.status) {
 }
 ```
 
-### Open Accessibility Settings
-
-To enable the accessibility service, guide the user to the system accessibility settings:
+You can explicitly request specific permissions:
 
 ```dart
-await screenTime.openAccessibilitySettings();
-```
+await screenTime.requestPermission(
+  permissionType: ScreenTimePermissionType.appUsage,
+);
 
-### Check if Service is Enabled
-
-```dart
-final isEnabled = await screenTime.isAppMonitoringServiceEnabled();
-```
-
-### Configure the Service
-
-You can configure the monitoring interval and lookback time:
-
-```dart
-await screenTime.configureAppMonitoringService(
-  interval: UsageInterval.daily,
-  lookbackTimeMs: 10000, // 10 seconds
+await screenTime.requestPermission(
+  permissionType: ScreenTimePermissionType.drawOverlay,
 );
 ```
 
@@ -166,7 +116,7 @@ See the [example](https://github.com/chandrabezzo/screen_time/tree/main/example)
 
 ## Customization
 
-You can customize the accessibility service by modifying the `accessibility_service_config.xml` file. For more advanced customization, refer to the [Android Accessibility Service documentation](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService).
+You can customize the blocking UI by overriding the `block_overlay` layout or by providing shield configuration parameters when calling `blockApps`. Refer to the example app for details.
 
 ## License
 

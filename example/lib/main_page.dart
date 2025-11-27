@@ -115,26 +115,6 @@ class _MainPageState extends State<MainPage> {
                                     ListTile(
                                       title: Text(
                                         ScreenTimePermissionType
-                                            .accessibilitySettings
-                                            .name,
-                                      ),
-                                      trailing: Icon(Icons.chevron_right),
-                                      onTap: () async {
-                                        final ctx = context;
-                                        final permission = await _screenTime
-                                            .requestPermission(
-                                              permissionType:
-                                                  ScreenTimePermissionType
-                                                      .accessibilitySettings,
-                                            );
-
-                                        if (!ctx.mounted) return;
-                                        Navigator.pop(ctx, permission);
-                                      },
-                                    ),
-                                    ListTile(
-                                      title: Text(
-                                        ScreenTimePermissionType
                                             .drawOverlay
                                             .name,
                                       ),
@@ -203,26 +183,6 @@ class _MainPageState extends State<MainPage> {
                                               permissionType:
                                                   ScreenTimePermissionType
                                                       .appUsage,
-                                            );
-
-                                        if (!ctx.mounted) return;
-                                        Navigator.pop(ctx, permission);
-                                      },
-                                    ),
-                                    ListTile(
-                                      title: Text(
-                                        ScreenTimePermissionType
-                                            .accessibilitySettings
-                                            .name,
-                                      ),
-                                      trailing: Icon(Icons.chevron_right),
-                                      onTap: () async {
-                                        final ctx = context;
-                                        final permission = await _screenTime
-                                            .permissionStatus(
-                                              permissionType:
-                                                  ScreenTimePermissionType
-                                                      .accessibilitySettings,
                                             );
 
                                         if (!ctx.mounted) return;

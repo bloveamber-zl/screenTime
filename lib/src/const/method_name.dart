@@ -14,7 +14,6 @@ class MethodName {
   static const isBlockingPaused = 'isBlockingPaused';
 
   static const monitoringAppUsage = 'monitoringAppUsage';
-  static const configureAppMonitoringService = 'configureAppMonitoringService';
   static const getBlockingStatus = 'getBlockingStatus';
 
   // iOS FamilyControls methods
